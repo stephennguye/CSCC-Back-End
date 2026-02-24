@@ -1,0 +1,156 @@
+# ============================================================
+# AI Call Center Backend — .gitignore
+# Python 3.12+ / FastAPI / Docker / PostgreSQL / Redis
+# ============================================================
+
+# ----------------------------
+# Python
+# ----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.pyc
+*.pyo
+*.pyd
+
+# ----------------------------
+# Virtual environments
+# ----------------------------
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# ----------------------------
+# Secrets & environment config
+# ----------------------------
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+*.p12
+*.pfx
+.secrets.baseline
+
+# ----------------------------
+# IDE & editor
+# ----------------------------
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.swp
+*.swo
+*~
+
+# ----------------------------
+# OS artifacts
+# ----------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ----------------------------
+# Logs & temp files
+# ----------------------------
+*.log
+*.tmp
+*.temp
+logs/
+*.pid
+
+# ----------------------------
+# Testing & coverage
+# ----------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+nosetests.xml
+pytest.xml
+
+# ----------------------------
+# Type checking
+# ----------------------------
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyright/
+
+# ----------------------------
+# Database
+# ----------------------------
+*.db
+*.sqlite
+*.sqlite3
+
+# ----------------------------
+# ChromaDB / vector store
+# ----------------------------
+data/chroma/
+
+# ----------------------------
+# Docker
+# ----------------------------
+.dockerignore
+
+# ----------------------------
+# Alembic
+# ----------------------------
+# Keep alembic/versions/*.py — do NOT ignore migrations
+
+# ----------------------------
+# Pre-commit
+# ----------------------------
+.ruff_cache/
+
+# ----------------------------
+# GitHub & tooling
+# ----------------------------
+.github/
+.specify/
+
+# ----------------------------
+# Project specs
+# ----------------------------
+specs/
+
+# ----------------------------
+# Distribution / packaging
+# ----------------------------
+*.whl
+*.tar.gz

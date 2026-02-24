@@ -1,0 +1,87 @@
+# ============================================================
+# AI Call Center Backend — Project Configuration
+# ============================================================
+
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "cscc-backend"
+version = "0.1.0"
+description = "AI Call Center Backend — Real-time voice AI with RAG"
+requires-python = ">=3.12"
+readme = "README.md"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+# ============================================================
+# Ruff — Linting & Formatting
+# ============================================================
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E",    # pycodestyle errors
+  "W",    # pycodestyle warnings
+  "F",    # pyflakes
+  "I",    # isort
+  "N",    # pep8-naming
+  "UP",   # pyupgrade
+  "B",    # flake8-bugbear
+  "C4",   # flake8-comprehensions
+  "SIM",  # flake8-simplify
+  "TCH",  # flake8-type-checking
+  "ANN",  # flake8-annotations (type hints)
+  "S",    # flake8-bandit (security)
+  "RUF",  # ruff-specific rules
+]
+ignore = [
+  "ANN101",  # missing self annotation
+  "ANN102",  # missing cls annotation
+  "S101",    # allow assert in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "ANN", "SIM"]
+"alembic/**/*.py" = ["ANN", "E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "lf"
+
+# ============================================================
+# Pytest
+# ============================================================
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = ["--strict-markers", "-v"]
+
+# ============================================================
+# Coverage
+# ============================================================
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["*/__init__.py", "*/migrations/*", "alembic/*"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 90

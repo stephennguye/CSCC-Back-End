@@ -1,0 +1,5 @@
+INFO:     Started server process [15800]
+INFO:     Waiting for application startup.
+{"event": "infrastructure_startup_complete", "level": "info", "logger": "src.main", "timestamp": "2026-02-24T10:02:51.211774Z"}
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8001 (Press CTRL+C to quit)

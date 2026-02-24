@@ -1,0 +1,73 @@
+# ============================================================
+# AI Call Center Backend — Python Dependencies
+# Python 3.12+  |  Branch: 001-ai-call-center-backend
+# ============================================================
+
+# --- Web Framework & ASGI ---
+fastapi>=0.115.0
+starlette>=0.41.0
+uvicorn[standard]>=0.32.0
+
+# --- LLM Providers ---
+openai>=1.55.0
+huggingface_hub>=0.27.0
+
+# --- Speech-to-Text ---
+faster-whisper>=1.1.0
+
+# --- Text-to-Speech ---
+# TTS>=0.22.0 is incompatible with Python 3.12; using the maintained fork instead
+coqui-tts>=0.0.1
+edge-tts>=6.1.12
+
+# --- Embeddings ---
+sentence-transformers>=3.3.0
+
+# --- Vector Store ---
+chromadb>=0.5.23
+
+# --- Redis ---
+aioredis>=2.0.1
+
+# --- PostgreSQL ---
+asyncpg>=0.30.0
+sqlalchemy[asyncio]>=2.0.36
+alembic>=1.14.0
+
+# --- Data Validation ---
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+
+# --- Auth ---
+python-jose[cryptography]>=3.3.0
+
+# --- Structured Logging ---
+structlog>=24.4.0
+
+# --- Observability ---
+prometheus-fastapi-instrumentator>=7.0.0
+opentelemetry-sdk>=1.29.0
+opentelemetry-api>=1.29.0
+opentelemetry-exporter-otlp-proto-grpc>=1.29.0
+opentelemetry-instrumentation-fastapi>=0.50b0
+opentelemetry-instrumentation-asyncpg>=0.50b0
+prometheus-client>=0.21.0
+
+# --- Architecture Enforcement ---
+import-linter>=2.1
+
+# --- Linting & Formatting ---
+ruff>=0.8.0
+
+# --- Pre-commit ---
+pre-commit>=4.0.0
+
+# --- Load Testing ---
+locust>=2.32.0
+
+# --- Testing ---
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+pytest-mock>=3.14.0
+testcontainers[postgres,redis]>=4.8.0
+httpx>=0.28.0

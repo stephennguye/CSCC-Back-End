@@ -1,0 +1,37 @@
+[importlinter]
+root_package = src
+include_external_packages = True
+
+# ============================================================
+# Clean Architecture Boundary Contracts
+#
+# Dependency direction (allowed): Domain ← Application ← Interface ← Infrastructure
+# All arrows point inward; no layer may import from an outer layer.
+# ============================================================
+
+[importlinter:contract:domain-independence]
+name = Domain layer must not import from application, interface, or infrastructure
+type = forbidden
+source_modules =
+    src.domain
+forbidden_modules =
+    src.application
+    src.interface
+    src.infrastructure
+
+[importlinter:contract:application-independence]
+name = Application layer must not import from interface or infrastructure
+type = forbidden
+source_modules =
+    src.application
+forbidden_modules =
+    src.interface
+    src.infrastructure
+
+[importlinter:contract:interface-independence]
+name = Interface layer must not import from infrastructure
+type = forbidden
+source_modules =
+    src.interface
+forbidden_modules =
+    src.infrastructure
