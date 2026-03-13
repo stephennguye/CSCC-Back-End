@@ -1,0 +1,38 @@
+INFO:     Started server process [32088]
+INFO:     Waiting for application startup.
+{"event": "infrastructure_startup_complete", "level": "info", "logger": "src.main", "timestamp": "2026-02-24T10:11:39.168721Z"}
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8002 (Press CTRL+C to quit)
+{"session_id": "65a7a9e0-7723-4104-99cf-803f50028ba8", "event": "session_created", "path": "/api/v1/sessions", "request_id": "099c49be-8843-4761-b556-3a2852246511", "method": "POST", "level": "info", "logger": "src.application.use_cases.handle_call", "timestamp": "2026-02-24T10:12:03.739795Z"}
+{"session_id": "65a7a9e0-7723-4104-99cf-803f50028ba8", "event": "session_created_response", "path": "/api/v1/sessions", "request_id": "099c49be-8843-4761-b556-3a2852246511", "method": "POST", "level": "info", "logger": "src.interface.rest.sessions", "timestamp": "2026-02-24T10:12:03.838685Z"}
+DEBUG:    = connection is CONNECTING
+DEBUG:    < GET /ws/calls/65a7a9e0-7723-4104-99cf-803f50028ba8 HTTP/1.1
+DEBUG:    < host: localhost:8002
+DEBUG:    < upgrade: websocket
+DEBUG:    < connection: Upgrade
+DEBUG:    < sec-websocket-key: yXEctsZ8pN/nXMLO0h5tug==
+DEBUG:    < sec-websocket-version: 13
+DEBUG:    < sec-websocket-extensions: permessage-deflate; client_max_window_bits
+DEBUG:    < authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2NWE3YTllMC03NzIzLTQxMDQtOTljZi04MDNmNTAwMjhiYTgiLCJpYXQiOjE3NzE5Mjc5MjMsImV4cCI6MTc3MTkyODIyM30.6KkN2Qart4oV7OWdY7NMdWJmFa9wfy1mak3rXwNaqeo
+DEBUG:    < user-agent: Python/3.12 websockets/16.0
+INFO:     127.0.0.1:56961 - "WebSocket /ws/calls/65a7a9e0-7723-4104-99cf-803f50028ba8" [accepted]
+{"session_id": "65a7a9e0-7723-4104-99cf-803f50028ba8", "event": "ws_connected", "level": "info", "logger": "src.interface.ws.call_controller", "timestamp": "2026-02-24T10:12:05.940843Z"}
+DEBUG:    > HTTP/1.1 101 Switching Protocols
+DEBUG:    > Upgrade: websocket
+DEBUG:    > Connection: Upgrade
+DEBUG:    > Sec-WebSocket-Accept: 9Kg332E0t0dKEsyHz07lrwpGIpg=
+DEBUG:    > Sec-WebSocket-Extensions: permessage-deflate
+DEBUG:    > date: Tue, 24 Feb 2026 10:12:05 GMT
+DEBUG:    > server: uvicorn
+INFO:     connection open
+DEBUG:    = connection is OPEN
+DEBUG:    > TEXT '{"type": "call_state", "state": "listening", "timestamp": 1771927925950}' [72 bytes]
+DEBUG:    < CLOSE 1000 (OK) [2 bytes]
+DEBUG:    = connection is CLOSING
+DEBUG:    > CLOSE 1000 (OK) [2 bytes]
+DEBUG:    x half-closing TCP connection
+DEBUG:    = connection is CLOSED
+{"session_id": "65a7a9e0-7723-4104-99cf-803f50028ba8", "new_state": "ended", "event": "session_teardown", "level": "info", "logger": "src.application.use_cases.handle_call", "timestamp": "2026-02-24T10:12:05.956349Z"}
+INFO:     connection closed
+{"session_id": "65a7a9e0-7723-4104-99cf-803f50028ba8", "event": "session_teardown_complete", "level": "info", "logger": "src.application.use_cases.handle_call", "timestamp": "2026-02-24T10:12:06.022143Z"}
+{"session_id": "65a7a9e0-7723-4104-99cf-803f50028ba8", "event": "ws_teardown_complete", "level": "info", "logger": "src.interface.ws.call_controller", "timestamp": "2026-02-24T10:12:06.022664Z"}

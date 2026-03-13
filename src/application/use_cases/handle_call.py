@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         SendTextFn,
         StreamConversationUseCase,
     )
+    from src.application.use_cases.tod_pipeline import TODPipelineUseCase
     from src.domain.entities.message import Message
     from src.infrastructure.cache.redis_client import RedisClient
 
@@ -94,12 +95,14 @@ class HandleCallUseCase:
         stream_conversation: StreamConversationUseCase,
         extract_claims: ExtractClaimsUseCase | None = None,
         generate_reminders: GenerateReminderUseCase | None = None,
+        tod_pipeline: TODPipelineUseCase | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._redis = redis
         self._stream = stream_conversation
         self._extract_claims = extract_claims
         self._generate_reminders = generate_reminders
+        self._tod_pipeline = tod_pipeline
 
         # Per-session audio queues
         # session_id → asyncio.Queue[bytes | None]

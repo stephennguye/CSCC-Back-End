@@ -37,9 +37,9 @@ router = APIRouter()
 # ── Dependency injection via app.state ───────────────────────────────────────
 
 
-def get_handle_call(request: Request) -> Any:  # noqa: ANN401
+def get_handle_call(websocket: WebSocket) -> Any:  # noqa: ANN401
     """FastAPI dependency — retrieve the HandleCallUseCase from app.state."""
-    handle_call = getattr(request.app.state, "handle_call", None)
+    handle_call = getattr(websocket.app.state, "handle_call", None)
     if handle_call is None:
         raise RuntimeError("HandleCallUseCase not initialised; app startup may have failed")
     return handle_call
@@ -149,6 +149,18 @@ def _adapt_outbound_frame(frame: dict[str, Any]) -> dict[str, Any] | None:
             "type": "error",
             "code": payload.get("code", "UNKNOWN_ERROR"),
             "message": payload.get("message", "An error occurred"),
+        }
+
+    if frame_type == "pipeline.state":
+        # TOD pipeline visualization — forward as-is to the frontend
+        return {
+            "type": "pipeline_state",
+            "session_id": str(payload.get("turn_id", "")),
+            "nlu": payload.get("nlu"),
+            "state": payload.get("state"),
+            "action": payload.get("action"),
+            "target_slot": payload.get("target_slot"),
+            "timestamp": payload.get("timestamp", ts_ms),
         }
 
     # audio.response.start, transcript.low_confidence, llm.fallback, rag.context, etc.

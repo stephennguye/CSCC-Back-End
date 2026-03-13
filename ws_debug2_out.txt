@@ -1,0 +1,1 @@
+INFO:     127.0.0.1:49363 - "POST /api/v1/sessions HTTP/1.1" 201 Created

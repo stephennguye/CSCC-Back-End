@@ -391,6 +391,11 @@ def create_app() -> FastAPI:
 
     app.include_router(reminders_router, prefix=API_PREFIX)
 
+    # ── TOD Dialogue Router ─────────────────────────────────────────────
+    from src.interface.rest.dialogue import router as dialogue_router
+
+    app.include_router(dialogue_router)
+
     # ── Phase 7 Routers ───────────────────────────────────────────────
     from src.interface.rest.conversations import router as conversations_router
     from src.interface.rest.health import router as health_router
@@ -419,12 +424,17 @@ async def _startup(app: FastAPI) -> None:
     from src.application.use_cases.ingest_document import IngestDocumentUseCase
     from src.application.use_cases.retrieve_knowledge import RetrieveKnowledgeUseCase
     from src.application.use_cases.stream_conversation import StreamConversationUseCase
+    from src.application.use_cases.tod_pipeline import TODPipelineUseCase
     from src.domain.services.prompt_sanitizer import PromptSanitizer
     from src.infrastructure.cache.redis_client import RedisClient
     from src.infrastructure.db.chroma.vector_repo import ChromaVectorRepository
     from src.infrastructure.db.postgres.session import AsyncSessionFactory
     from src.infrastructure.llm.huggingface_client import HuggingFaceLLMAdapter
     from src.infrastructure.llm.openai_client import OpenAILLMAdapter
+    from src.infrastructure.dst.hybrid_dst_adapter import HybridDSTAdapter
+    from src.infrastructure.nlg.template_nlg_adapter import TemplateNLGAdapter
+    from src.infrastructure.nlu.phobert_nlu_adapter import PhoBERTNLUAdapter
+    from src.infrastructure.policy.rule_policy_adapter import RulePolicyAdapter
     from src.infrastructure.stt.faster_whisper_adapter import FasterWhisperAdapter
     from src.infrastructure.tts.coqui_tts_adapter import CoquiTTSAdapter
     from src.infrastructure.tts.edge_tts_adapter import EdgeTTSAdapter
@@ -451,6 +461,20 @@ async def _startup(app: FastAPI) -> None:
     app.state.ingest_document = ingest_document
     app.state.document_repo_factory = AsyncSessionFactory
 
+    # ── TOD pipeline infrastructure ──────────────────────────────────────
+    nlu_adapter = PhoBERTNLUAdapter()
+    dst_adapter = HybridDSTAdapter()
+    policy_adapter = RulePolicyAdapter()
+    nlg_adapter = TemplateNLGAdapter()
+
+    tod_pipeline = TODPipelineUseCase(
+        nlu=nlu_adapter,
+        dst=dst_adapter,
+        policy=policy_adapter,
+        nlg=nlg_adapter,
+    )
+    app.state.tod_pipeline = tod_pipeline
+
     # ── Use cases ──────────────────────────────────────────────────────────
     stream_conversation = StreamConversationUseCase(
         stt=stt,
@@ -461,6 +485,7 @@ async def _startup(app: FastAPI) -> None:
         prompt_sanitizer=sanitizer,
         redis=redis,
         retrieve_knowledge=retrieve_knowledge,
+        tod_pipeline=tod_pipeline,
     )
 
     # ── Phase 5: Claim extraction ────────────────────────────────────────

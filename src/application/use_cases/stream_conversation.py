@@ -1,14 +1,15 @@
-"""StreamConversationUseCase — STT → PromptSanitizer → RAG (stub) → LLM → TTS pipeline.
+"""StreamConversationUseCase — STT → TOD Pipeline → TTS pipeline.
 
 Orchestrates one full AI turn:
   1. Transcribes the audio stream (STT).
-  2. Sanitizes user input (PromptSanitizer).
-  3. Retrieves RAG context (stub — pass-through, populated in Phase 4 / T040).
-  4. Generates an AI response (LLM, with primary→fallback chain).
+  2. Low-confidence check.
+  3. Routes through TOD pipeline (NLU → DST → Policy → NLG) when available.
+  4. Falls back to RAG + LLM path for FAQ intents or when TOD is unavailable.
   5. Synthesizes audio (TTS, with primary→fallback chain).
   6. Streams all WS frames (transcript.partial, transcript.final,
-     transcript.low_confidence, response.token, audio.response.*) to the
-     caller via injected ``send_text`` / ``send_binary`` callbacks.
+     transcript.low_confidence, transcript.ai_final, pipeline.state,
+     response.token, audio.response.*) to the caller via injected
+     ``send_text`` / ``send_binary`` callbacks.
   7. Monitors the Redis barge-in Pub/Sub channel and cancels in-flight
      LLM/TTS whenever the caller starts speaking during an AI response.
 """
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
     from src.application.ports.stt_port import STTPort, TranscriptionChunk
     from src.application.ports.tts_port import TTSPort
     from src.application.use_cases.retrieve_knowledge import RetrieveKnowledgeUseCase
+    from src.application.use_cases.tod_pipeline import TODPipelineUseCase
     from src.domain.services.prompt_sanitizer import PromptSanitizer
     from src.infrastructure.cache.redis_client import RedisClient
 
@@ -103,6 +105,7 @@ class StreamConversationUseCase:
         prompt_sanitizer: PromptSanitizer,
         redis: RedisClient,
         retrieve_knowledge: RetrieveKnowledgeUseCase | None = None,
+        tod_pipeline: TODPipelineUseCase | None = None,
     ) -> None:
         self._stt = stt
         self._llm_primary = llm_primary
@@ -112,6 +115,7 @@ class StreamConversationUseCase:
         self._sanitizer = prompt_sanitizer
         self._redis = redis
         self._retrieve_knowledge = retrieve_knowledge
+        self._tod_pipeline = tod_pipeline
 
     # ------------------------------------------------------------------ #
     # Public API                                                           #
@@ -180,73 +184,67 @@ class StreamConversationUseCase:
             )
             return ""
 
-        # ── 3. Prompt sanitization ─────────────────────────────────────────
-        try:
-            safe_transcript = self._sanitizer.sanitize(transcript)
-        except PromptInjectionDetectedError:
-            logger.warning("prompt_injection_blocked", session_id=session_str)
-            raise
-
-        # ── 4. RAG context retrieval ───────────────────────────────────────
-        rag_context: str = ""
-        if self._retrieve_knowledge is not None:
-            rag_context = await self._retrieve_knowledge.execute(safe_transcript)
-
-        # ── 5. Build LLM messages ──────────────────────────────────────────
-        messages = self._build_messages(
-            conversation_history=conversation_history,
-            user_transcript=safe_transcript,
-            rag_context=rag_context,
-        )
-
-        # ── 6. LLM streaming + barge-in monitoring ─────────────────────────
         turn_id = str(uuid.uuid4())
-        ai_response_tokens: list[str] = []
 
-        with tracer.start_as_current_span("call.llm") as llm_span:
-            llm_span.set_attribute("session_id", session_str)
-            llm_span.set_attribute("turn_id", turn_id)
+        # ── 3. TOD pipeline path (primary) ────────────────────────────────
+        if self._tod_pipeline is not None:
+            with tracer.start_as_current_span("call.tod_pipeline") as tod_span:
+                tod_span.set_attribute("session_id", session_str)
+                tod_span.set_attribute("turn_id", turn_id)
 
-            llm_task = asyncio.create_task(
-                self._stream_llm_tokens(
+                tod_result = await self._tod_pipeline.process_turn(
                     session_id=session_str,
-                    messages=messages,
+                    user_text=transcript,
+                )
+
+            # If policy chose FAQ, fall back to RAG+LLM path
+            if tod_result.get("action") == "faq":
+                logger.info("tod_faq_fallback_to_rag", session_id=session_str)
+                ai_response_text = await self._run_rag_llm_path(
+                    session_id=session_str,
+                    transcript=transcript,
+                    conversation_history=conversation_history,
                     turn_id=turn_id,
                     send_text=send_text,
-                    ai_tokens=ai_response_tokens,
+                    tracer=tracer,
                 )
+                if not ai_response_text:
+                    return ""
+            else:
+                ai_response_text = str(tod_result.get("response_text", ""))
+                if not ai_response_text:
+                    return ""
+
+                # Emit pipeline.state for visualization
+                await send_text(
+                    {
+                        "type": "pipeline.state",
+                        "session_id": session_str,
+                        "payload": {
+                            "turn_id": turn_id,
+                            "nlu": tod_result.get("nlu"),
+                            "state": tod_result.get("state"),
+                            "action": tod_result.get("action"),
+                            "target_slot": tod_result.get("target_slot"),
+                            "timestamp": _utc_now_iso(),
+                        },
+                    }
+                )
+
+        # ── 3b. RAG+LLM fallback path (when TOD pipeline not available) ──
+        else:
+            ai_response_text = await self._run_rag_llm_path(
+                session_id=session_str,
+                transcript=transcript,
+                conversation_history=conversation_history,
+                turn_id=turn_id,
+                send_text=send_text,
+                tracer=tracer,
             )
-            barge_in_task = asyncio.create_task(
-                self._watch_barge_in(session_id=session_str)
-            )
+            if not ai_response_text:
+                return ""
 
-            done, pending = await asyncio.wait(
-                {llm_task, barge_in_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            for task in pending:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-
-        if barge_in_task in done and not barge_in_task.cancelled():
-            # Barge-in occurred — abort the pipeline
-            logger.info("barge_in_detected", session_id=session_str)
-            return ""
-
-        # Re-raise any LLM exception
-        if llm_task in done:
-            exc = llm_task.exception()
-            if exc is not None:
-                raise exc
-
-        ai_response_text = "".join(ai_response_tokens)
-        if not ai_response_text:
-            return ""
-
-        # ── 7. TTS streaming ──────────────────────────────────────────────
-        # Send transcript.ai_final before TTS starts
+        # ── 4. Send transcript.ai_final ───────────────────────────────────
         await send_text(
             {
                 "type": "transcript.ai_final",
@@ -260,6 +258,7 @@ class StreamConversationUseCase:
             }
         )
 
+        # ── 5. TTS streaming ─────────────────────────────────────────────
         with tracer.start_as_current_span("call.tts") as tts_span:
             tts_span.set_attribute("session_id", session_str)
             tts_span.set_attribute("turn_id", turn_id)
@@ -276,6 +275,81 @@ class StreamConversationUseCase:
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
     # ------------------------------------------------------------------ #
+
+    async def _run_rag_llm_path(
+        self,
+        *,
+        session_id: str,
+        transcript: str,
+        conversation_history: list[dict[str, str]],
+        turn_id: str,
+        send_text: SendTextFn,
+        tracer: object,
+    ) -> str:
+        """Execute the RAG + LLM fallback path.
+
+        Returns the AI response text, or empty string on barge-in / empty result.
+        """
+        # Prompt sanitization
+        try:
+            safe_transcript = self._sanitizer.sanitize(transcript)
+        except PromptInjectionDetectedError:
+            logger.warning("prompt_injection_blocked", session_id=session_id)
+            raise
+
+        # RAG context retrieval
+        rag_context: str = ""
+        if self._retrieve_knowledge is not None:
+            rag_context = await self._retrieve_knowledge.execute(safe_transcript)
+
+        # Build LLM messages
+        messages = self._build_messages(
+            conversation_history=conversation_history,
+            user_transcript=safe_transcript,
+            rag_context=rag_context,
+        )
+
+        # LLM streaming + barge-in monitoring
+        ai_response_tokens: list[str] = []
+
+        with tracer.start_as_current_span("call.llm") as llm_span:
+            llm_span.set_attribute("session_id", session_id)
+            llm_span.set_attribute("turn_id", turn_id)
+
+            llm_task = asyncio.create_task(
+                self._stream_llm_tokens(
+                    session_id=session_id,
+                    messages=messages,
+                    turn_id=turn_id,
+                    send_text=send_text,
+                    ai_tokens=ai_response_tokens,
+                )
+            )
+            barge_in_task = asyncio.create_task(
+                self._watch_barge_in(session_id=session_id)
+            )
+
+            done, pending = await asyncio.wait(
+                {llm_task, barge_in_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            for task in pending:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+        if barge_in_task in done and not barge_in_task.cancelled():
+            logger.info("barge_in_detected", session_id=session_id)
+            return ""
+
+        # Re-raise any LLM exception
+        if llm_task in done:
+            exc = llm_task.exception()
+            if exc is not None:
+                raise exc
+
+        return "".join(ai_response_tokens)
 
     async def _transcribe(
         self,

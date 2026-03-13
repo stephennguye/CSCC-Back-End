@@ -334,6 +334,44 @@ class AudioResponseFrame(_WSFrame):
     payload: AudioResponsePayload
 
 
+# ── pipeline.state (TOD pipeline visualization) ─────────────────────────
+
+
+class PipelineStateNLU(BaseModel):
+    model_config = ConfigDict(strict=False, extra="forbid", frozen=True)
+
+    intent: str
+    confidence: float
+    slots: dict[str, str]
+
+
+class PipelineStateDialogue(BaseModel):
+    model_config = ConfigDict(strict=False, extra="forbid", frozen=True)
+
+    session_id: str
+    intent: str | None
+    intent_confidence: float
+    slots: dict[str, str | None]
+    confirmed: bool
+    turn_count: int
+
+
+class PipelineStatePayload(BaseModel):
+    model_config = ConfigDict(strict=False, extra="forbid", frozen=True)
+
+    turn_id: str
+    nlu: PipelineStateNLU
+    state: PipelineStateDialogue
+    action: str
+    target_slot: str | None = None
+    timestamp: str
+
+
+class PipelineStateFrame(_WSFrame):
+    type: Literal["pipeline.state"] = "pipeline.state"
+    payload: PipelineStatePayload
+
+
 # ── Discriminated union of all outbound frames ───────────────────────────────
 
 OutboundWSFrame = Annotated[
@@ -349,6 +387,7 @@ OutboundWSFrame = Annotated[
     | ErrorFrame
     | BargeInAckFrame
     | LLMFallbackFrame
-    | RAGContextFrame,
+    | RAGContextFrame
+    | PipelineStateFrame,
     Field(discriminator="type"),
 ]
