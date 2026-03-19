@@ -6,7 +6,7 @@ Uses Redis counters incremented via :class:`~src.infrastructure.cache.redis_clie
 Configuration (environment variables):
     - ``RATE_LIMIT_SESSIONS``       — requests / window for ``/api/v1/sessions``       (default 20)
     - ``RATE_LIMIT_CONVERSATIONS``  — requests / window for ``/api/v1/conversations/*`` (default 60)
-    - ``RATE_LIMIT_DOCUMENTS``      — requests / window for ``/api/v1/documents/*``     (default 10)
+    - ``RATE_LIMIT_DIALOGUE``       — requests / window for ``/api/v1/dialogue/*``      (default 30)
     - ``RATE_LIMIT_WINDOW_SECONDS`` — sliding-window duration in seconds                (default 60)
 
 When a rate limit is exceeded the middleware returns a ``429 Too Many Requests``
@@ -38,7 +38,7 @@ logger = structlog.get_logger(__name__)
 
 _LIMIT_SESSIONS: int = int(os.environ.get("RATE_LIMIT_SESSIONS", "20"))
 _LIMIT_CONVERSATIONS: int = int(os.environ.get("RATE_LIMIT_CONVERSATIONS", "60"))
-_LIMIT_DOCUMENTS: int = int(os.environ.get("RATE_LIMIT_DOCUMENTS", "10"))
+_LIMIT_DIALOGUE: int = int(os.environ.get("RATE_LIMIT_DIALOGUE", "30"))
 
 # Endpoints exempt from rate limiting
 _EXEMPT_PATHS: frozenset[str] = frozenset({
@@ -63,8 +63,8 @@ def _get_limit_for_path(path: str) -> tuple[int, str] | None:
         return _LIMIT_SESSIONS, "sessions"
     if path.startswith("/api/v1/conversations"):
         return _LIMIT_CONVERSATIONS, "conversations"
-    if path.startswith("/api/v1/documents"):
-        return _LIMIT_DOCUMENTS, "documents"
+    if path.startswith("/api/v1/dialogue"):
+        return _LIMIT_DIALOGUE, "dialogue"
     # Default for any other /api/v1/* path: use conversations limit
     if path.startswith("/api/v1/"):
         return _LIMIT_CONVERSATIONS, "api_default"

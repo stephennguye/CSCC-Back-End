@@ -16,15 +16,8 @@ huggingface_hub>=0.27.0
 faster-whisper>=1.1.0
 
 # --- Text-to-Speech ---
-# TTS>=0.22.0 is incompatible with Python 3.12; using the maintained fork instead
-coqui-tts>=0.0.1
 edge-tts>=6.1.12
-
-# --- Embeddings ---
-sentence-transformers>=3.3.0
-
-# --- Vector Store ---
-chromadb>=0.5.23
+gTTS>=2.5.0
 
 # --- Redis ---
 aioredis>=2.0.1
@@ -65,9 +58,15 @@ pre-commit>=4.0.0
 # --- Load Testing ---
 locust>=2.32.0
 
+# --- .env Loading ---
+python-dotenv>=1.0.0
+
 # --- Testing ---
 pytest>=8.3.0
 pytest-asyncio>=0.24.0
 pytest-mock>=3.14.0
 testcontainers[postgres,redis]>=4.8.0
 httpx>=0.28.0
+
+# --- Load Testing (websocket-client for Locust WS tests) ---
+websocket-client>=1.6.0

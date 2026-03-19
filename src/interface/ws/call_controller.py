@@ -6,7 +6,7 @@ Lifecycle::
 
     Client ──upgrade(Bearer token)──→ validate JWT & session
            ──audio.chunk frames─────→ queue audio chunks
-           ──audio.end──────────────→ trigger STT→LLM→TTS pipeline
+           ──audio.end──────────────→ trigger STT→TOD→TTS pipeline
            ──session.end────────────→ graceful teardown
            ↩ disconnect (abrupt)    → same teardown path as session.end
 """
@@ -36,13 +36,7 @@ router = APIRouter()
 
 # ── Dependency injection via app.state ───────────────────────────────────────
 
-
-def get_handle_call(websocket: WebSocket) -> Any:  # noqa: ANN401
-    """FastAPI dependency — retrieve the HandleCallUseCase from app.state."""
-    handle_call = getattr(websocket.app.state, "handle_call", None)
-    if handle_call is None:
-        raise RuntimeError("HandleCallUseCase not initialised; app startup may have failed")
-    return handle_call
+from src.interface.dependencies import get_handle_call_ws as get_handle_call
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -59,14 +53,18 @@ def _extract_token(websocket: WebSocket) -> str | None:
 
 async def _send_text(websocket: WebSocket, frame: dict[str, Any]) -> None:
     """Serialize *frame* to JSON and send as a text WebSocket message."""
-    with contextlib.suppress(Exception):
+    try:
         await websocket.send_text(json.dumps(frame, default=str))
+    except Exception as exc:
+        logger.warning("ws_send_text_error", frame_type=frame.get("type"), error=str(exc))
 
 
 async def _send_binary(websocket: WebSocket, data: bytes) -> None:
     """Send raw audio bytes as a binary WebSocket message."""
-    with contextlib.suppress(Exception):
+    try:
         await websocket.send_bytes(data)
+    except Exception as exc:
+        logger.warning("ws_send_binary_error", error=str(exc), data_len=len(data))
 
 
 # ── State value mapping: BE internal → FE expected ————————————————————————————
@@ -77,6 +75,7 @@ _STATE_MAP: dict[str, str] = {
     "ai_thinking": "thinking",
     "ai_speaking": "speaking",
     "call_ended": "ended",
+    "reconnecting": "reconnecting",
     "error": "error",
 }
 
@@ -120,15 +119,6 @@ def _adapt_outbound_frame(frame: dict[str, Any]) -> dict[str, Any] | None:
             "timestamp": ts_ms,
         }
 
-    if frame_type == "response.token":
-        # Streaming AI LLM token
-        return {
-            "type": "transcript_token",
-            "speaker": "ai",
-            "token": payload.get("token", ""),
-            "timestamp": ts_ms,
-        }
-
     if frame_type == "transcript.ai_final":
         # Committed AI response turn
         return {
@@ -152,19 +142,47 @@ def _adapt_outbound_frame(frame: dict[str, Any]) -> dict[str, Any] | None:
         }
 
     if frame_type == "pipeline.state":
-        # TOD pipeline visualization — forward as-is to the frontend
+        # TOD pipeline visualization — forward to the frontend
+        # Ensure the state shape matches FE PipelineStateSchema expectations
+        raw_state = payload.get("state") or {}
+        actual_session_id = frame.get("session_id", "")
         return {
             "type": "pipeline_state",
-            "session_id": str(payload.get("turn_id", "")),
+            "session_id": str(actual_session_id),
+            "stt_text": payload.get("stt_text"),
             "nlu": payload.get("nlu"),
-            "state": payload.get("state"),
+            "state": {
+                "session_id": str(actual_session_id),
+                "intent": raw_state.get("intent") or raw_state.get("current_intent"),
+                "intent_confidence": raw_state.get("intent_confidence", 0.0),
+                "slots": raw_state.get("slots", {}),
+                "confirmed": raw_state.get("confirmed", False),
+                "turn_count": raw_state.get("turn_count", 0),
+            },
             "action": payload.get("action"),
             "target_slot": payload.get("target_slot"),
-            "timestamp": payload.get("timestamp", ts_ms),
+            "nlg_response": payload.get("nlg_response", ""),
         }
 
-    # audio.response.start, transcript.low_confidence, llm.fallback, rag.context, etc.
-    # have no matching FE schema — drop silently
+    if frame_type == "audio.response.start":
+        # Transition FE to 'speaking' so barge-in detection and UI update work
+        return {
+            "type": "call_state",
+            "state": "speaking",
+            "timestamp": ts_ms,
+        }
+
+    if frame_type == "transcript.low_confidence":
+        # Surface the low-confidence prompt as an AI transcript commit
+        # so the user sees the system's "please repeat" message
+        return {
+            "type": "transcript_commit",
+            "speaker": "ai",
+            "text": payload.get("prompt_message", ""),
+            "timestamp": ts_ms,
+        }
+
+    # Unrecognised frame types — drop silently
     return None
 
 
@@ -258,13 +276,18 @@ async def ws_call_handler(
         handle_call._audio_queues[session_id] = asyncio.Queue()
         handle_call._pending_messages[session_id] = []
 
+    # Clear stale dialogue state on reconnect so intent/slots don't carry over
+    if handle_call._tod_pipeline is not None:
+        handle_call._tod_pipeline.clear_state(session_id)
+
     # ── Accept the WebSocket connection ────────────────────────────────────
     await websocket.accept()
     structlog.contextvars.bind_contextvars(session_id=session_id)
     logger.info("ws_connected", session_id=session_id)
 
-    # Mark presence
-    await handle_call._redis.mark_present(session_id)
+    # Mark presence (graceful on Redis failure)
+    with contextlib.suppress(Exception):
+        await handle_call._redis.mark_present(session_id)
 
     # Notify client that we're listening
     await _send_session_state(websocket, session_id, "listening")
@@ -303,6 +326,18 @@ async def ws_call_handler(
                 # FE-initiated graceful teardown
                 await _teardown(websocket, session_id, handle_call, graceful=True)
                 break
+
+            if fe_type == "audio_end":
+                # VAD detected end-of-speech — trigger the STT→TOD→TTS pipeline
+                logger.info("audio_end_vad", session_id=session_id)
+                await _send_session_state(websocket, session_id, "ai_thinking", "listening")
+                await handle_call.handle_audio_end(
+                    session_id,
+                    send_text=lambda d: _send_adapted(websocket, d),
+                    send_binary=lambda b: _send_binary(websocket, b),
+                )
+                await _send_session_state(websocket, session_id, "listening", "ai_speaking")
+                continue
 
             if fe_type == "barge_in":
                 # FE detected voice activity during AI speech — publish Redis cancel signal

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from src.domain.errors import LLMFallbackError
+from src.domain.errors import TTSSynthesisError
 from src.infrastructure.observability.circuit_breaker import CircuitBreaker, CircuitOpenError
 
 if TYPE_CHECKING:
@@ -52,7 +52,7 @@ async def _get_tts():  # type: ignore[return]  # noqa: ANN202
                 lambda: TTS(model_name=_COQUI_MODEL, progress_bar=False),
             )
         except Exception as exc:
-            raise LLMFallbackError(
+            raise TTSSynthesisError(
                 f"Failed to load Coqui TTS model '{_COQUI_MODEL}': {exc}"
             ) from exc
     return _tts_instance
@@ -106,11 +106,11 @@ class CoquiTTSAdapter:
                     None, lambda: tts.tts(text=text, **kwargs)
                 )
         except CircuitOpenError as exc:
-            raise LLMFallbackError(f"Coqui TTS circuit breaker open: {exc}") from exc
-        except LLMFallbackError:
+            raise TTSSynthesisError(f"Coqui TTS circuit breaker open: {exc}") from exc
+        except TTSSynthesisError:
             raise
         except Exception as exc:
-            raise LLMFallbackError(f"Coqui TTS synthesis failed: {exc}") from exc
+            raise TTSSynthesisError(f"Coqui TTS synthesis failed: {exc}") from exc
 
         # Convert float32 to PCM16 bytes and yield in chunks
         pcm_bytes = _float32_to_pcm16(samples)

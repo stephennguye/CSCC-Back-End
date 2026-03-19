@@ -89,28 +89,6 @@ ws_bargein_total: Counter = _make_counter(  # type: ignore[type-arg]
     "Total barge-in events (caller speaking during AI response).",
 )
 
-# ════════════════════════════════════════════════════════════════════════════
-# LLM — latency and fallback
-# ════════════════════════════════════════════════════════════════════════════
-
-llm_request_duration_seconds: Histogram = _make_histogram(  # type: ignore[type-arg]
-    "cscc_llm_request_duration_seconds",
-    "Time in seconds from first LLM token request to last token received.",
-    labels=["provider"],  # "openai" | "huggingface"
-    buckets=(0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, float("inf")),
-)
-
-llm_fallback_total: Counter = _make_counter(  # type: ignore[type-arg]
-    "cscc_llm_fallback_total",
-    "Total LLM fallback activations (primary failed, using fallback provider).",
-    labels=["from_provider", "to_provider"],
-)
-
-llm_errors_total: Counter = _make_counter(  # type: ignore[type-arg]
-    "cscc_llm_errors_total",
-    "Total LLM errors (timeout, fallback exhausted, etc.).",
-    labels=["provider", "error_type"],
-)
 
 # ════════════════════════════════════════════════════════════════════════════
 # STT — transcription processing time

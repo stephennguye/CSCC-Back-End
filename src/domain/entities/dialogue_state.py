@@ -18,7 +18,6 @@ class PolicyAction(Enum):
     PROVIDE_INFO = "provide_info"
     ESCALATE = "escalate"
     FAREWELL = "farewell"
-    FAQ = "faq"
 
 
 @dataclass
@@ -55,6 +54,7 @@ BOOKING_SLOTS: list[str] = [
     "depart_date.day_name",
     "depart_date.month_name",
     "depart_date.day_number",
+    "depart_date.today_relative",
     "depart_time.time",
     "airline_name",
     "flight_number",
@@ -82,6 +82,7 @@ class DialogueState:
         default_factory=lambda: {slot: None for slot in BOOKING_SLOTS}
     )
     confirmed: bool = False
+    executed: bool = False
     turn_count: int = 0
     history: list[dict[str, object]] = field(default_factory=list)
 
@@ -118,3 +119,11 @@ class DialogueState:
             "turn_count": self.turn_count,
             "history": list(self.history),
         }
+
+    def reset_for_new_booking(self) -> None:
+        """Reset state for a new booking while keeping session context."""
+        self.intent = None
+        self.intent_confidence = 0.0
+        self.slots = {slot: None for slot in BOOKING_SLOTS}
+        self.confirmed = False
+        self.executed = False

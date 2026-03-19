@@ -5,8 +5,8 @@ Response behaviour (per contracts/rest-api.md):
   - Non-critical service down     → 207  ``{"status": "degraded", ...}``
   - Critical service down         → 503  ``{"status": "degraded", ...}``
 
-Critical services: PostgreSQL, Redis, at least one LLM provider (OpenAI OR HuggingFace).
-Non-critical: ChromaDB, faster-whisper, TTS.
+Critical services: PostgreSQL, Redis.
+Non-critical: faster-whisper, TTS.
 
 Notes:
   - Each probe is wrapped in asyncio.wait_for(timeout=4) so the endpoint
@@ -69,23 +69,6 @@ async def _probe_redis(redis: Any) -> None:  # noqa: ANN401
     if not ok:
         msg = "Redis PING returned False"
         raise ConnectionError(msg)
-
-
-async def _probe_chromadb() -> None:
-    """Probe ChromaDB by listing collections (synchronous call in a thread)."""
-
-    def _sync_list() -> None:
-        try:
-            from src.infrastructure.db.chroma.vector_repo import (
-                _get_chroma_client,  # type: ignore[attr-defined]
-            )
-
-            client = _get_chroma_client()
-            client.list_collections()
-        except ImportError as exc:
-            raise RuntimeError(f"chromadb not installed: {exc}") from exc
-
-    await asyncio.get_event_loop().run_in_executor(None, _sync_list)
 
 
 async def _probe_openai() -> None:
@@ -169,9 +152,6 @@ async def get_health(request: Request) -> JSONResponse:
         await asyncio.gather(
             pg_coro,
             redis_coro,
-            _probe(_probe_chromadb()),
-            _probe(_probe_openai()),
-            _probe(_probe_huggingface()),
             _probe(_probe_faster_whisper()),
             _probe(_probe_tts()),
         )
@@ -179,19 +159,13 @@ async def get_health(request: Request) -> JSONResponse:
 
     pg_ok, pg_ms, pg_err = gathered[0]
     redis_ok, redis_ms, redis_err = gathered[1]
-    chroma_ok, chroma_ms, chroma_err = gathered[2]
-    oai_ok, oai_ms, oai_err = gathered[3]
-    hf_ok, hf_ms, hf_err = gathered[4]
-    whisper_ok, whisper_ms, whisper_err = gathered[5]
-    tts_ok, tts_ms, tts_err = gathered[6]
+    whisper_ok, whisper_ms, whisper_err = gathered[2]
+    tts_ok, tts_ms, tts_err = gathered[3]
 
     # ── Determine overall status ──────────────────────────────────────────────
-    # Critical: postgres, redis, and at least one functioning LLM provider.
-    llm_ok = oai_ok or hf_ok
-    critical_down = (not pg_ok) or (not redis_ok) or (not llm_ok)
-    any_down = not all(
-        [pg_ok, redis_ok, chroma_ok, oai_ok, hf_ok, whisper_ok, tts_ok]
-    )
+    # Critical: postgres, redis
+    critical_down = (not pg_ok) or (not redis_ok)
+    any_down = not all([pg_ok, redis_ok, whisper_ok, tts_ok])
 
     if critical_down:
         http_status = 503
@@ -216,9 +190,6 @@ async def get_health(request: Request) -> JSONResponse:
         services={
             "postgres": _svc(pg_ok, pg_ms, pg_err),
             "redis": _svc(redis_ok, redis_ms, redis_err),
-            "chromadb": _svc(chroma_ok, chroma_ms, chroma_err),
-            "openai": _svc(oai_ok, oai_ms, oai_err),
-            "huggingface": _svc(hf_ok, hf_ms, hf_err),
             "faster_whisper": _svc(whisper_ok, whisper_ms, whisper_err),
             "tts": _svc(tts_ok, tts_ms, tts_err),
         },
@@ -229,9 +200,6 @@ async def get_health(request: Request) -> JSONResponse:
         status=overall,
         postgres=pg_ok,
         redis=redis_ok,
-        chromadb=chroma_ok,
-        openai=oai_ok,
-        huggingface=hf_ok,
         faster_whisper=whisper_ok,
         tts=tts_ok,
     )

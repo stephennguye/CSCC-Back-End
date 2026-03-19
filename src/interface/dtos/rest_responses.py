@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
@@ -135,28 +135,6 @@ class RemindersResponse(_BaseResponse):
     reminders: list[ReminderData]
     total: int
     reminders_status: Literal["pending", "complete"]
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# POST /documents/ingest
-# ════════════════════════════════════════════════════════════════════════════
-
-
-class DocumentIngestRequest(_BaseResponse):
-    """Request body for POST /api/v1/documents/ingest."""
-
-    content: str = Field(..., description="Raw extracted text; max 2 MB")
-    title: str | None = None
-    source: str | None = None
-    metadata: dict[str, Any] | None = None
-
-
-class DocumentIngestResponse(_BaseResponse):
-    """Response body for POST /api/v1/documents/ingest (202 Accepted)."""
-
-    document_id: uuid.UUID
-    status: Literal["ingesting"]
-    message: str
 
 
 # ════════════════════════════════════════════════════════════════════════════

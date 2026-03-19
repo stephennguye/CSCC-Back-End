@@ -21,23 +21,28 @@ class RulePolicyAdapter:
 
     def decide(self, state: DialogueState) -> PolicyDecision:
         """Determine next action based on current dialogue state."""
-        # Greeting intent
+        # Greeting intent — always respond regardless of state
         if state.intent == "greet":
             return PolicyDecision(action=PolicyAction.GREET)
 
-        # Farewell intent
+        # Farewell intent — always respond regardless of state
         if state.intent == "farewell":
             return PolicyDecision(action=PolicyAction.FAREWELL)
 
-        # FAQ-type intents that should fall back to RAG+LLM
+        # Post-execution: booking was already processed.
+        # If the user provides new flight info, start a new booking.
+        # Otherwise, offer further assistance.
+        if state.executed:
+            return PolicyDecision(action=PolicyAction.PROVIDE_INFO)
+
+        # Info-request intents — respond with a polite clarification
         if state.intent in ("atis_abbreviation", "atis_ground_service"):
-            return PolicyDecision(action=PolicyAction.FAQ)
+            return PolicyDecision(action=PolicyAction.CLARIFY)
 
         # Booking flow: check required slots
         missing = state.missing_required()
 
         if missing:
-            # Request the first missing required slot
             return PolicyDecision(
                 action=PolicyAction.REQUEST_SLOT,
                 target_slot=missing[0],

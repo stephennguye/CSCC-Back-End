@@ -6,10 +6,20 @@ applying confidence thresholds and slot overwrite rules.
 
 from __future__ import annotations
 
+import re
+
 from src.domain.entities.dialogue_state import DialogueState, NLUResult
 
 # Minimum confidence to accept a slot value
 _SLOT_CONFIDENCE_THRESHOLD: float = 0.5
+
+# Trailing punctuation that STT may append to slot values
+_TRAILING_PUNCT = re.compile(r"[.,;:!?]+$")
+
+
+def _clean_slot_value(value: str) -> str:
+    """Strip trailing punctuation and excess whitespace from slot values."""
+    return _TRAILING_PUNCT.sub("", value).strip()
 
 
 class HybridDSTAdapter:
@@ -35,8 +45,7 @@ class HybridDSTAdapter:
 
         for slot in nlu_result.slots:
             if slot.confidence >= _SLOT_CONFIDENCE_THRESHOLD:
-                # Only overwrite if new value has sufficient confidence
-                state.slots[slot.name] = slot.value
+                state.slots[slot.name] = _clean_slot_value(slot.value)
 
         # Record turn in history
         state.history.append({

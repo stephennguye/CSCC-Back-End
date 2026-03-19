@@ -1,6 +1,6 @@
 # ============================================================
 # AI Call Center Backend — Docker Compose
-# Services: PostgreSQL, Redis, ChromaDB, Backend API
+# Services: PostgreSQL, Redis, Backend API
 # ============================================================
 
 services:
@@ -48,28 +48,6 @@ services:
       start_period: 10s
 
   # ----------------------------------------------------------
-  # ChromaDB — vector embeddings for RAG
-  # ----------------------------------------------------------
-  chromadb:
-    image: chromadb/chroma:0.5.23
-    container_name: cscc_chromadb
-    restart: unless-stopped
-    environment:
-      IS_PERSISTENT: "TRUE"
-      PERSIST_DIRECTORY: /chroma/chroma
-      ANONYMIZED_TELEMETRY: "FALSE"
-    ports:
-      - "8001:8000"
-    volumes:
-      - chroma_data:/chroma/chroma
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/v1/heartbeat || exit 1"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-
-  # ----------------------------------------------------------
   # Backend API — FastAPI application
   # ----------------------------------------------------------
   backend:
@@ -86,15 +64,12 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cscc}:${POSTGRES_PASSWORD:-cscc_pass}@postgres:5432/${POSTGRES_DB:-cscc_db}
       REDIS_URL: redis://redis:6379/0
-      CHROMA_DB_PATH: /app/data/chroma
     ports:
       - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      chromadb:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/api/v1/health || exit 1"]
@@ -109,8 +84,6 @@ volumes:
   postgres_data:
     driver: local
   redis_data:
-    driver: local
-  chroma_data:
     driver: local
   backend_data:
     driver: local

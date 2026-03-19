@@ -151,21 +151,6 @@ class TranscriptLowConfidenceFrame(_WSFrame):
     payload: TranscriptLowConfidencePayload
 
 
-# ── response.token ───────────────────────────────────────────────────────────
-
-
-class ResponseTokenPayload(BaseModel):
-    model_config = ConfigDict(strict=False, extra="forbid", frozen=True)
-
-    token: str
-    turn_id: str
-
-
-class ResponseTokenFrame(_WSFrame):
-    type: Literal["response.token"] = "response.token"
-    payload: ResponseTokenPayload
-
-
 # ── transcript.ai_final ──────────────────────────────────────────────────────
 
 
@@ -241,13 +226,11 @@ class SessionStateFrame(_WSFrame):
 # ── error ────────────────────────────────────────────────────────────────────
 
 WSErrorCode = Literal[
-    "LLM_TIMEOUT",
-    "LLM_FALLBACK_EXHAUSTED",
     "TRANSCRIPTION_ERROR",
-    "PROMPT_INJECTION_DETECTED",
     "SESSION_ENDED",
     "SESSION_EXPIRED",
     "INVALID_PAYLOAD",
+    "UNKNOWN_ERROR",
 ]
 
 
@@ -278,43 +261,6 @@ class BargeInAckFrame(_WSFrame):
     payload: BargeInAckPayload
 
 
-# ── llm.fallback ─────────────────────────────────────────────────────────────
-
-
-class LLMFallbackPayload(BaseModel):
-    model_config = ConfigDict(strict=False, extra="forbid", frozen=True)
-
-    reason: str
-    fallback_model: str
-
-
-class LLMFallbackFrame(_WSFrame):
-    type: Literal["llm.fallback"] = "llm.fallback"
-    payload: LLMFallbackPayload
-
-
-# ── rag.context ──────────────────────────────────────────────────────────────
-
-
-class RAGSource(BaseModel):
-    model_config = ConfigDict(strict=False, extra="forbid", frozen=True)
-
-    document_id: uuid.UUID
-    chunk_index: int
-    title: str | None = None
-    confidence: float = Field(..., ge=0.0, le=1.0)
-
-
-class RAGContextPayload(BaseModel):
-    model_config = ConfigDict(strict=False, extra="forbid", frozen=True)
-
-    turn_id: str
-    sources: list[RAGSource]
-
-
-class RAGContextFrame(_WSFrame):
-    type: Literal["rag.context"] = "rag.context"
-    payload: RAGContextPayload
 
 
 # ── audio.response (JSON fallback) ───────────────────────────────────────────
@@ -378,7 +324,6 @@ OutboundWSFrame = Annotated[
     TranscriptPartialFrame
     | TranscriptFinalFrame
     | TranscriptLowConfidenceFrame
-    | ResponseTokenFrame
     | TranscriptAIFinalFrame
     | AudioResponseStartFrame
     | AudioResponseEndFrame
@@ -386,8 +331,6 @@ OutboundWSFrame = Annotated[
     | SessionStateFrame
     | ErrorFrame
     | BargeInAckFrame
-    | LLMFallbackFrame
-    | RAGContextFrame
     | PipelineStateFrame,
     Field(discriminator="type"),
 ]

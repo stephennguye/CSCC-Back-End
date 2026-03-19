@@ -9,7 +9,7 @@ build-backend = "setuptools.backends.legacy:build"
 [project]
 name = "cscc-backend"
 version = "0.1.0"
-description = "AI Call Center Backend — Real-time voice AI with RAG"
+description = "AI Call Center Backend — Real-time voice AI with TOD pipeline"
 requires-python = ">=3.12"
 readme = "README.md"
 

@@ -6,13 +6,12 @@ Supports Vietnamese voice selection.  Yields chunks ≤ 4 KB (FR-016).
 
 from __future__ import annotations
 
-import io
 import os
 from typing import TYPE_CHECKING
 
 import structlog
 
-from src.domain.errors import LLMFallbackError
+from src.domain.errors import TTSSynthesisError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -59,7 +58,7 @@ class EdgeTTSAdapter:
         try:
             import edge_tts  # type: ignore[import-untyped]
         except ImportError as exc:
-            raise LLMFallbackError(
+            raise TTSSynthesisError(
                 "edge-tts package is not installed; install it with `pip install edge-tts`"
             ) from exc
 
@@ -67,19 +66,25 @@ class EdgeTTSAdapter:
 
         try:
             communicate = edge_tts.Communicate(text, voice=chosen_voice)
-            buffer = io.BytesIO()
 
-            async for chunk_type, chunk_data in communicate.stream():
-                if chunk_type == "audio":
-                    buffer.write(chunk_data)
+            # Stream chunks as they arrive from the API instead of buffering.
+            # edge-tts yields variable-size audio messages; we re-chunk to ≤4 KB.
+            carry = b""
+            async for message in communicate.stream():
+                if message.get("type") == "audio":
+                    data = carry + message["data"]
+                    carry = b""
+                    while len(data) >= _CHUNK_SIZE:
+                        yield data[:_CHUNK_SIZE]
+                        data = data[_CHUNK_SIZE:]
+                    if data:
+                        carry = data
 
+            # Flush remaining bytes
+            if carry:
+                yield carry
+
+        except TTSSynthesisError:
+            raise
         except Exception as exc:
-            raise LLMFallbackError(f"edge-tts synthesis failed: {exc}") from exc
-
-        # Yield collected audio data in ≤4 KB chunks
-        buffer.seek(0)
-        while True:
-            chunk = buffer.read(_CHUNK_SIZE)
-            if not chunk:
-                break
-            yield chunk
+            raise TTSSynthesisError(f"edge-tts synthesis failed: {exc}") from exc

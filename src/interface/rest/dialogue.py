@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from typing import Any
 
+import structlog
+from fastapi import APIRouter, Depends
+
+from src.interface.dependencies import get_tod_pipeline
 from src.interface.dtos.dialogue_dtos import (
     DialogueStateData,
     DialogueTurnRequest,
@@ -12,22 +15,31 @@ from src.interface.dtos.dialogue_dtos import (
     NLUData,
 )
 
-router = APIRouter(prefix="/api/v1/dialogue", tags=["dialogue"])
+logger = structlog.get_logger(__name__)
+
+router = APIRouter(prefix="/dialogue", tags=["dialogue"])
 
 
 @router.post("/turn", response_model=DialogueTurnResponse)
 async def dialogue_turn(
     body: DialogueTurnRequest,
-    request: Request,
+    tod_pipeline: Any = Depends(get_tod_pipeline),  # noqa: ANN401, B008
 ) -> DialogueTurnResponse:
     """Process a single dialogue turn through the TOD pipeline.
 
     Accepts user text, runs NLU -> DST -> Policy -> NLG,
     returns response text plus pipeline visualization data.
     """
-    tod_pipeline = request.app.state.tod_pipeline
+    log = logger.bind(session_id=body.session_id)
+    log.info("dialogue_turn_received", text_length=len(body.text))
 
     result = await tod_pipeline.process_turn(body.session_id, body.text)
+
+    log.info(
+        "dialogue_turn_complete",
+        intent=result["nlu"]["intent"],
+        action=result["action"],
+    )
 
     state_data = result["state"]
     return DialogueTurnResponse(

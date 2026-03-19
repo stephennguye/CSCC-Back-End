@@ -31,13 +31,7 @@ router = APIRouter(tags=["conversations"])
 
 # ── Dependency injection ───────────────────────────────────────────────────────
 
-
-def get_session_factory(request: Request) -> Any:  # noqa: ANN401
-    """FastAPI dependency — retrieve the async session factory from app.state."""
-    factory = getattr(request.app.state, "session_factory", None)
-    if factory is None:
-        raise RuntimeError("session_factory not initialised; app startup failed")
-    return factory
+from src.interface.dependencies import get_session_factory
 
 
 # ── Endpoint ───────────────────────────────────────────────────────────────────

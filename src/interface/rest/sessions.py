@@ -101,13 +101,7 @@ def _ws_url(request: Request, session_id: str) -> str:
 
 # ── Dependency injection via app.state ───────────────────────────────────────
 
-
-def get_handle_call(request: Request) -> Any:  # noqa: ANN401
-    """FastAPI dependency — retrieve the HandleCallUseCase from app.state."""
-    handle_call = getattr(request.app.state, "handle_call", None)
-    if handle_call is None:
-        raise RuntimeError("HandleCallUseCase not initialised; app startup may have failed")
-    return handle_call
+from src.interface.dependencies import get_handle_call, get_session_factory
 
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -188,13 +182,6 @@ async def create_session(
 
 
 # ── GET /api/v1/sessions/{session_id} — Post-call summary ────────────────────
-
-def get_session_factory(request: Request) -> Any:  # noqa: ANN401
-    """FastAPI dependency — retrieve session factory from app.state."""
-    factory = getattr(request.app.state, "session_factory", None)
-    if factory is None:
-        raise RuntimeError("session_factory not initialised; app startup failed")
-    return factory
 
 
 @router.get(

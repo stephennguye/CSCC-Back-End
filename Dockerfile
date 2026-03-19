@@ -70,8 +70,8 @@ COPY --chown=appuser:appgroup alembic.ini ./alembic.ini
 COPY --chown=appuser:appgroup src/ ./src/
 COPY --chown=appuser:appgroup pyproject.toml ./pyproject.toml
 
-# Create data directory for ChromaDB (local fallback)
-RUN mkdir -p /app/data/chroma && chown -R appuser:appgroup /app/data
+# Create data directory for application state
+RUN mkdir -p /app/data && chown -R appuser:appgroup /app/data
 
 # Drop to non-root
 USER appuser

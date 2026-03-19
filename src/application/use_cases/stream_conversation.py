@@ -2,22 +2,17 @@
 
 Orchestrates one full AI turn:
   1. Transcribes the audio stream (STT).
-  2. Low-confidence check.
-  3. Routes through TOD pipeline (NLU → DST → Policy → NLG) when available.
-  4. Falls back to RAG + LLM path for FAQ intents or when TOD is unavailable.
-  5. Synthesizes audio (TTS, with primary→fallback chain).
-  6. Streams all WS frames (transcript.partial, transcript.final,
+  2. Low-confidence / hallucination check.
+  3. Routes through TOD pipeline (NLU → DST → Policy → NLG).
+  4. Synthesizes audio (TTS, with primary→fallback chain).
+  5. Streams all WS frames (transcript.partial, transcript.final,
      transcript.low_confidence, transcript.ai_final, pipeline.state,
-     response.token, audio.response.*) to the caller via injected
+     audio.response.*) to the caller via injected
      ``send_text`` / ``send_binary`` callbacks.
-  7. Monitors the Redis barge-in Pub/Sub channel and cancels in-flight
-     LLM/TTS whenever the caller starts speaking during an AI response.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import os
 import uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine
@@ -26,23 +21,13 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from src.domain.errors import (
-    LLMFallbackError,
-    LLMFallbackExhaustedError,
-    LLMTimeoutError,
-    PromptInjectionDetectedError,
-    TranscriptionError,
-)
+from src.domain.errors import TranscriptionError
 from src.domain.value_objects.confidence_score import ConfidenceScore
 
 if TYPE_CHECKING:
-    from src.application.ports.llm_port import LLMPort
     from src.application.ports.stt_port import STTPort, TranscriptionChunk
     from src.application.ports.tts_port import TTSPort
-    from src.application.use_cases.retrieve_knowledge import RetrieveKnowledgeUseCase
     from src.application.use_cases.tod_pipeline import TODPipelineUseCase
-    from src.domain.services.prompt_sanitizer import PromptSanitizer
-    from src.infrastructure.cache.redis_client import RedisClient
 
 logger = structlog.get_logger(__name__)
 
@@ -79,10 +64,9 @@ class _NoopTracer:
 _CONFIDENCE_THRESHOLD: float = float(
     os.environ.get("ASR_CONFIDENCE_THRESHOLD", "0.6")
 )
-_LOW_CONFIDENCE_PROMPT = (
-    "I'm sorry, I didn't quite catch that. Could you please repeat?"
+_LOW_CONFIDENCE_RESPONSE = (
+    "Xin lỗi, em chưa nghe rõ. Anh/chị có thể nói lại được không ạ?"
 )
-_LLM_FALLBACK_TIMEOUT: float = 2.0  # seconds before switching to fallback
 
 # Type aliases for WS send callbacks
 SendTextFn = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
@@ -90,32 +74,22 @@ SendBinaryFn = Callable[[bytes], Coroutine[Any, Any, None]]
 
 
 class StreamConversationUseCase:
-    """Orchestrates a single AI response turn.
+    """Orchestrates a single AI response turn via the TOD pipeline.
 
-    Injected via FastAPI DI by :func:`~src.main.create_app`.
+    Pipeline: STT → NLU → DST → Policy → NLG → TTS
     """
 
     def __init__(
         self,
         stt: STTPort,
-        llm_primary: LLMPort,
-        llm_fallback: LLMPort,
+        tod_pipeline: TODPipelineUseCase,
         tts_primary: TTSPort,
         tts_fallback: TTSPort,
-        prompt_sanitizer: PromptSanitizer,
-        redis: RedisClient,
-        retrieve_knowledge: RetrieveKnowledgeUseCase | None = None,
-        tod_pipeline: TODPipelineUseCase | None = None,
     ) -> None:
         self._stt = stt
-        self._llm_primary = llm_primary
-        self._llm_fallback = llm_fallback
+        self._tod_pipeline = tod_pipeline
         self._tts_primary = tts_primary
         self._tts_fallback = tts_fallback
-        self._sanitizer = prompt_sanitizer
-        self._redis = redis
-        self._retrieve_knowledge = retrieve_knowledge
-        self._tod_pipeline = tod_pipeline
 
     # ------------------------------------------------------------------ #
     # Public API                                                           #
@@ -129,18 +103,18 @@ class StreamConversationUseCase:
         conversation_history: list[dict[str, str]],
         send_text: SendTextFn,
         send_binary: SendBinaryFn,
-    ) -> str:
+    ) -> tuple[str, str]:
         """Execute one full turn of the AI conversation pipeline.
 
         Args:
             session_id:           UUID of the active call session.
             audio_stream:         Async generator yielding raw PCM bytes.
-            conversation_history: OpenAI-style message list for context.
+            conversation_history: Prior turns (unused by TOD but kept for API compat).
             send_text:            Async callback to push a text WS frame dict.
             send_binary:          Async callback to push a binary WS frame.
 
         Returns:
-            The full AI response text (collected from the LLM token stream).
+            Tuple of (user_transcript, ai_response_text).
         """
         session_str = str(session_id)
         tracer = _get_tracer()
@@ -159,35 +133,64 @@ class StreamConversationUseCase:
                 send_text=send_text,
             )
 
-        if not transcript:
-            logger.debug("empty_transcript", session_id=session_str)
-            return ""
+        logger.info(
+            "stt_complete",
+            session_id=session_str,
+            transcript=transcript[:100] if transcript else "(empty)",
+            confidence=confidence.value,
+        )
 
-        # ── 2. Low-confidence fallback ─────────────────────────────────────
+        if not transcript:
+            logger.info("empty_transcript_skipping", session_id=session_str)
+            return "", ""
+
+        # ── 1b. Hallucination / noise filter ──────────────────────────────
+        # Very low confidence → almost certainly noise hallucination; drop silently.
+        _HALLUCINATION_THRESHOLD = 0.35
+        if confidence.value < _HALLUCINATION_THRESHOLD:
+            logger.warning(
+                "stt_hallucination_rejected",
+                session_id=session_str,
+                transcript=transcript[:80],
+                confidence=confidence.value,
+            )
+            return "", ""
+
+        # ── 2. Low-confidence fallback ───────────────────────────────────
+        # Only prompt the user to repeat if confidence is moderately low
+        # (real but unclear speech). For borderline noise (< 0.45), drop silently.
         if confidence.is_below_threshold(_CONFIDENCE_THRESHOLD):
+            if confidence.value < 0.45:
+                logger.info(
+                    "stt_low_confidence_silent_drop",
+                    session_id=session_str,
+                    transcript=transcript[:80],
+                    confidence=confidence.value,
+                )
+                return "", ""
             await send_text(
                 {
                     "type": "transcript.low_confidence",
                     "session_id": session_str,
                     "payload": {
                         "segment_id": str(uuid.uuid4()),
-                        "prompt_message": _LOW_CONFIDENCE_PROMPT,
+                        "prompt_message": _LOW_CONFIDENCE_RESPONSE,
                     },
                 }
             )
             await self._synthesize_and_stream(
                 session_id=session_str,
-                text=_LOW_CONFIDENCE_PROMPT,
+                text=_LOW_CONFIDENCE_RESPONSE,
                 turn_id=str(uuid.uuid4()),
                 send_text=send_text,
                 send_binary=send_binary,
             )
-            return ""
+            return transcript, ""
 
         turn_id = str(uuid.uuid4())
 
-        # ── 3. TOD pipeline path (primary) ────────────────────────────────
-        if self._tod_pipeline is not None:
+        # ── 3. TOD pipeline (NLU → DST → Policy → NLG) ──────────────────
+        try:
             with tracer.start_as_current_span("call.tod_pipeline") as tod_span:
                 tod_span.set_attribute("session_id", session_str)
                 tod_span.set_attribute("turn_id", turn_id)
@@ -196,55 +199,52 @@ class StreamConversationUseCase:
                     session_id=session_str,
                     user_text=transcript,
                 )
-
-            # If policy chose FAQ, fall back to RAG+LLM path
-            if tod_result.get("action") == "faq":
-                logger.info("tod_faq_fallback_to_rag", session_id=session_str)
-                ai_response_text = await self._run_rag_llm_path(
-                    session_id=session_str,
-                    transcript=transcript,
-                    conversation_history=conversation_history,
-                    turn_id=turn_id,
-                    send_text=send_text,
-                    tracer=tracer,
-                )
-                if not ai_response_text:
-                    return ""
-            else:
-                ai_response_text = str(tod_result.get("response_text", ""))
-                if not ai_response_text:
-                    return ""
-
-                # Emit pipeline.state for visualization
-                await send_text(
-                    {
-                        "type": "pipeline.state",
-                        "session_id": session_str,
-                        "payload": {
-                            "turn_id": turn_id,
-                            "nlu": tod_result.get("nlu"),
-                            "state": tod_result.get("state"),
-                            "action": tod_result.get("action"),
-                            "target_slot": tod_result.get("target_slot"),
-                            "timestamp": _utc_now_iso(),
-                        },
-                    }
-                )
-
-        # ── 3b. RAG+LLM fallback path (when TOD pipeline not available) ──
-        else:
-            ai_response_text = await self._run_rag_llm_path(
+        except Exception as exc:
+            logger.exception(
+                "tod_pipeline_error",
                 session_id=session_str,
-                transcript=transcript,
-                conversation_history=conversation_history,
-                turn_id=turn_id,
-                send_text=send_text,
-                tracer=tracer,
+                user_text=transcript[:80],
+                error=str(exc),
             )
-            if not ai_response_text:
-                return ""
+            # Send a fallback error response so the user isn't left hanging
+            fallback = "Xin lỗi, hệ thống gặp lỗi. Vui lòng thử lại."
+            await send_text(
+                {
+                    "type": "transcript.ai_final",
+                    "session_id": session_str,
+                    "payload": {
+                        "turn_id": turn_id,
+                        "text": fallback,
+                        "timestamp": _utc_now_iso(),
+                        "sequence_number": 1,
+                    },
+                }
+            )
+            return transcript, fallback
 
-        # ── 4. Send transcript.ai_final ───────────────────────────────────
+        ai_response_text = str(tod_result.get("response_text", ""))
+        if not ai_response_text:
+            return transcript, ""
+
+        # Emit pipeline.state for visualization
+        await send_text(
+            {
+                "type": "pipeline.state",
+                "session_id": session_str,
+                "payload": {
+                    "turn_id": turn_id,
+                    "stt_text": transcript,
+                    "nlu": tod_result.get("nlu"),
+                    "state": tod_result.get("state"),
+                    "action": tod_result.get("action"),
+                    "target_slot": tod_result.get("target_slot"),
+                    "nlg_response": ai_response_text,
+                    "timestamp": _utc_now_iso(),
+                },
+            }
+        )
+
+        # ── 4. Send transcript.ai_final ──────────────────────────────────
         await send_text(
             {
                 "type": "transcript.ai_final",
@@ -259,97 +259,29 @@ class StreamConversationUseCase:
         )
 
         # ── 5. TTS streaming ─────────────────────────────────────────────
-        with tracer.start_as_current_span("call.tts") as tts_span:
-            tts_span.set_attribute("session_id", session_str)
-            tts_span.set_attribute("turn_id", turn_id)
-            await self._synthesize_and_stream(
-                session_id=session_str,
-                text=ai_response_text,
-                turn_id=turn_id,
-                send_text=send_text,
-                send_binary=send_binary,
-            )
+        import asyncio
 
-        return ai_response_text
+        try:
+            await asyncio.wait_for(
+                self._synthesize_and_stream(
+                    session_id=session_str,
+                    text=ai_response_text,
+                    turn_id=turn_id,
+                    send_text=send_text,
+                    send_binary=send_binary,
+                ),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("tts_timeout", session_id=session_str, text_length=len(ai_response_text))
+        except Exception:
+            logger.exception("tts_error", session_id=session_str)
+
+        return transcript, ai_response_text
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
     # ------------------------------------------------------------------ #
-
-    async def _run_rag_llm_path(
-        self,
-        *,
-        session_id: str,
-        transcript: str,
-        conversation_history: list[dict[str, str]],
-        turn_id: str,
-        send_text: SendTextFn,
-        tracer: object,
-    ) -> str:
-        """Execute the RAG + LLM fallback path.
-
-        Returns the AI response text, or empty string on barge-in / empty result.
-        """
-        # Prompt sanitization
-        try:
-            safe_transcript = self._sanitizer.sanitize(transcript)
-        except PromptInjectionDetectedError:
-            logger.warning("prompt_injection_blocked", session_id=session_id)
-            raise
-
-        # RAG context retrieval
-        rag_context: str = ""
-        if self._retrieve_knowledge is not None:
-            rag_context = await self._retrieve_knowledge.execute(safe_transcript)
-
-        # Build LLM messages
-        messages = self._build_messages(
-            conversation_history=conversation_history,
-            user_transcript=safe_transcript,
-            rag_context=rag_context,
-        )
-
-        # LLM streaming + barge-in monitoring
-        ai_response_tokens: list[str] = []
-
-        with tracer.start_as_current_span("call.llm") as llm_span:
-            llm_span.set_attribute("session_id", session_id)
-            llm_span.set_attribute("turn_id", turn_id)
-
-            llm_task = asyncio.create_task(
-                self._stream_llm_tokens(
-                    session_id=session_id,
-                    messages=messages,
-                    turn_id=turn_id,
-                    send_text=send_text,
-                    ai_tokens=ai_response_tokens,
-                )
-            )
-            barge_in_task = asyncio.create_task(
-                self._watch_barge_in(session_id=session_id)
-            )
-
-            done, pending = await asyncio.wait(
-                {llm_task, barge_in_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            for task in pending:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-
-        if barge_in_task in done and not barge_in_task.cancelled():
-            logger.info("barge_in_detected", session_id=session_id)
-            return ""
-
-        # Re-raise any LLM exception
-        if llm_task in done:
-            exc = llm_task.exception()
-            if exc is not None:
-                raise exc
-
-        return "".join(ai_response_tokens)
 
     async def _transcribe(
         self,
@@ -399,101 +331,6 @@ class StreamConversationUseCase:
 
         return final_text.strip(), ConfidenceScore(value=max(0.0, min(1.0, best_confidence)))
 
-    async def _stream_llm_tokens(
-        self,
-        *,
-        session_id: str,
-        messages: list[dict[str, str]],
-        turn_id: str,
-        send_text: SendTextFn,
-        ai_tokens: list[str],
-    ) -> None:
-        """Call LLM with primary→fallback chain; emit response.token per token."""
-        import time
-
-        t0 = time.perf_counter()
-        provider = "openai"
-        try:
-            async with asyncio.timeout(_LLM_FALLBACK_TIMEOUT):
-                async for token in await self._llm_primary.generate_stream(messages):
-                    ai_tokens.append(token)
-                    await send_text(
-                        {
-                            "type": "response.token",
-                            "session_id": session_id,
-                            "payload": {"token": token, "turn_id": turn_id},
-                        }
-                    )
-            import contextlib as _cl
-            with _cl.suppress(Exception):
-                from src.infrastructure.observability.metrics import (
-                    llm_request_duration_seconds,
-                )
-                llm_request_duration_seconds.labels(provider=provider).observe(
-                    time.perf_counter() - t0
-                )
-            return
-        except (LLMTimeoutError, LLMFallbackError, TimeoutError) as exc:
-            logger.warning(
-                "llm_primary_failed_switching_to_fallback",
-                session_id=session_id,
-                error=str(exc),
-            )
-            import contextlib as _cl
-            with _cl.suppress(Exception):
-                from src.infrastructure.observability.metrics import llm_fallback_total
-                llm_fallback_total.labels(
-                    from_provider="openai", to_provider="huggingface"
-                ).inc()
-            ai_tokens.clear()
-
-        # Fallback
-        provider = "huggingface"
-        t0 = time.perf_counter()
-        try:
-            async for token in await self._llm_fallback.generate_stream(messages):
-                ai_tokens.append(token)
-                await send_text(
-                    {
-                        "type": "response.token",
-                        "session_id": session_id,
-                        "payload": {"token": token, "turn_id": turn_id},
-                    }
-                )
-            import contextlib as _cl
-            with _cl.suppress(Exception):
-                from src.infrastructure.observability.metrics import (
-                    llm_request_duration_seconds,
-                )
-                llm_request_duration_seconds.labels(provider=provider).observe(
-                    time.perf_counter() - t0
-                )
-        except Exception as exc:
-            import contextlib as _cl
-            with _cl.suppress(Exception):
-                from src.infrastructure.observability.metrics import llm_errors_total
-                llm_errors_total.labels(
-                    provider=provider, error_type="fallback_exhausted"
-                ).inc()
-            raise LLMFallbackExhaustedError(
-                f"Both LLM providers failed: {exc}"
-            ) from exc
-
-    async def _watch_barge_in(self, *, session_id: str) -> None:
-        """Wait for a barge-in signal on the Redis Pub/Sub channel.
-
-        Returns normally when a ``cancel`` message is received;
-        raises ``asyncio.CancelledError`` if the task is cancelled externally.
-        """
-        pubsub = await self._redis.subscribe_barge_in(session_id)
-        try:
-            async for message in pubsub.listen():
-                if message.get("type") == "message":
-                    return  # barge-in signal received
-        finally:
-            await pubsub.unsubscribe()
-            await pubsub.aclose()
-
     async def _synthesize_and_stream(
         self,
         *,
@@ -503,7 +340,19 @@ class StreamConversationUseCase:
         send_text: SendTextFn,
         send_binary: SendBinaryFn,
     ) -> None:
-        """Run TTS with primary→fallback chain; stream audio.response.* frames."""
+        """Run TTS with primary→fallback chain; stream audio.response.* frames.
+
+        Collects MP3 bytes from the TTS adapter, converts to PCM Int16 16 kHz
+        mono via ffmpeg, and streams the result as binary WebSocket frames.
+        """
+        logger.info(
+            "tts_starting",
+            session_id=session_id,
+            turn_id=turn_id,
+            text_length=len(text),
+            text_preview=text[:60],
+        )
+
         await send_text(
             {
                 "type": "audio.response.start",
@@ -511,21 +360,29 @@ class StreamConversationUseCase:
                 "payload": {"turn_id": turn_id, "codec": "pcm_16khz_mono"},
             }
         )
+        logger.info("tts_sent_audio_start", session_id=session_id)
 
-        success = await self._try_tts(
+        ok = await self._try_tts(
             tts=self._tts_primary,
             text=text,
             send_binary=send_binary,
             session_id=session_id,
             label="primary",
         )
-        if not success:
-            await self._try_tts(
+        if not ok:
+            logger.warning("tts_primary_failed_trying_fallback", session_id=session_id)
+            ok = await self._try_tts(
                 tts=self._tts_fallback,
                 text=text,
                 send_binary=send_binary,
                 session_id=session_id,
                 label="fallback",
+            )
+        if not ok:
+            logger.error(
+                "tts_all_providers_failed",
+                session_id=session_id,
+                text_length=len(text),
             )
 
         await send_text(
@@ -535,6 +392,7 @@ class StreamConversationUseCase:
                 "payload": {"turn_id": turn_id},
             }
         )
+        logger.info("tts_sent_audio_end", session_id=session_id, success=ok)
 
     async def _try_tts(
         self,
@@ -545,15 +403,111 @@ class StreamConversationUseCase:
         session_id: str,
         label: str,
     ) -> bool:
-        """Attempt to stream TTS audio; return True on success, False on failure."""
+        """Attempt TTS synthesis with streaming MP3→PCM conversion.
+
+        Pipes MP3 chunks from the TTS adapter into ffmpeg as they arrive,
+        reads PCM from ffmpeg's stdout concurrently, and streams PCM chunks
+        to the WebSocket immediately — so the user hears audio within ~200ms
+        of the first TTS chunk instead of waiting for full synthesis.
+        """
+        import contextlib as _cl
+        import subprocess
         import time
 
         t0 = time.perf_counter()
-        provider = "coqui" if label == "primary" else "edge_tts"
+        provider = "edge_tts" if label == "primary" else "gtts"
         try:
-            async for chunk in await tts.synthesize_stream(text):
-                await send_binary(chunk)
-            import contextlib as _cl
+            logger.info("tts_synthesizing", label=label, session_id=session_id)
+
+            # Start ffmpeg with piped stdin/stdout for streaming conversion
+            try:
+                proc = subprocess.Popen(
+                    [
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel", "error",
+                        "-i", "pipe:0",
+                        "-f", "s16le",
+                        "-ar", "16000",
+                        "-ac", "1",
+                        "pipe:1",
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            except FileNotFoundError:
+                logger.error("ffmpeg_not_found", detail="ffmpeg is required for TTS")
+                return False
+
+            import asyncio
+
+            loop = asyncio.get_event_loop()
+            mp3_total = 0
+            pcm_total = 0
+            chunks_sent = 0
+            chunk_size = 4096
+            first_chunk_sent = False
+
+            # Feed MP3 to ffmpeg stdin in a thread (blocking writes)
+            async def _feed_mp3() -> None:
+                nonlocal mp3_total
+                try:
+                    async for mp3_chunk in await tts.synthesize_stream(text):
+                        mp3_total += len(mp3_chunk)
+                        await loop.run_in_executor(None, proc.stdin.write, mp3_chunk)
+                finally:
+                    await loop.run_in_executor(None, proc.stdin.close)
+
+            # Read PCM from ffmpeg stdout and stream to client
+            async def _read_and_stream() -> None:
+                nonlocal pcm_total, chunks_sent, first_chunk_sent
+                while True:
+                    pcm_data = await loop.run_in_executor(
+                        None, proc.stdout.read, chunk_size
+                    )
+                    if not pcm_data:
+                        break
+                    if not first_chunk_sent:
+                        first_chunk_sent = True
+                        logger.info(
+                            "tts_first_audio_chunk",
+                            label=label,
+                            session_id=session_id,
+                            latency_ms=round((time.perf_counter() - t0) * 1000),
+                        )
+                    pcm_total += len(pcm_data)
+                    await send_binary(pcm_data)
+                    chunks_sent += 1
+
+            # Run feed and read concurrently
+            feed_task = asyncio.create_task(_feed_mp3())
+            read_task = asyncio.create_task(_read_and_stream())
+
+            try:
+                await asyncio.gather(feed_task, read_task)
+            finally:
+                # Ensure process is cleaned up
+                with _cl.suppress(Exception):
+                    proc.stdout.close()
+                with _cl.suppress(Exception):
+                    proc.stderr.close()
+                with _cl.suppress(Exception):
+                    await loop.run_in_executor(None, proc.wait)
+
+            if proc.returncode and proc.returncode != 0:
+                stderr = proc.stderr.read() if proc.stderr else b""
+                logger.warning(
+                    "ffmpeg_conversion_error",
+                    label=label,
+                    session_id=session_id,
+                    stderr=stderr.decode(errors="replace")[:200] if stderr else "",
+                )
+
+            if mp3_total == 0:
+                logger.warning("tts_empty_output", label=label, session_id=session_id)
+                return False
+
             with _cl.suppress(Exception):
                 from src.infrastructure.observability.metrics import (
                     tts_processing_duration_seconds,
@@ -561,12 +515,21 @@ class StreamConversationUseCase:
                 tts_processing_duration_seconds.labels(provider=provider).observe(
                     time.perf_counter() - t0
                 )
+
+            logger.info(
+                "tts_streamed",
+                label=label,
+                session_id=session_id,
+                mp3_bytes=mp3_total,
+                pcm_bytes=pcm_total,
+                chunks_sent=chunks_sent,
+                duration_ms=round((time.perf_counter() - t0) * 1000),
+            )
             return True
         except Exception as exc:
             logger.warning(
                 "tts_failed", label=label, session_id=session_id, error=str(exc)
             )
-            import contextlib as _cl
             with _cl.suppress(Exception):
                 from src.infrastructure.observability.metrics import (
                     tts_errors_total,
@@ -576,34 +539,6 @@ class StreamConversationUseCase:
                 if label == "primary":
                     tts_fallback_total.inc()
             return False
-
-    # ------------------------------------------------------------------ #
-    # Helpers                                                              #
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def _build_messages(
-        *,
-        conversation_history: list[dict[str, str]],
-        user_transcript: str,
-        rag_context: str,
-    ) -> list[dict[str, str]]:
-        """Assemble the OpenAI-compatible message list for the LLM."""
-        system_prompt = (
-            "You are a helpful AI call center agent. "
-            "Respond concisely and professionally."
-        )
-        if rag_context:
-            system_prompt += (
-                f"\n\nRelevant context from the knowledge base:\n{rag_context}"
-            )
-
-        messages: list[dict[str, str]] = [
-            {"role": "system", "content": system_prompt},
-            *conversation_history,
-            {"role": "user", "content": user_transcript},
-        ]
-        return messages
 
 
 def _utc_now_iso() -> str:

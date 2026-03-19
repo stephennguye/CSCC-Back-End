@@ -61,12 +61,23 @@ class TemplateNLGAdapter:
                 parts.append(f"từ {filled['fromloc.city_name']}")
             if "toloc.city_name" in filled:
                 parts.append(f"đến {filled['toloc.city_name']}")
-            if "depart_date.day_name" in filled:
+            if "depart_date.day_number" in filled:
+                date_str = filled["depart_date.day_number"]
+                if "depart_date.month_name" in filled:
+                    date_str += f" {filled['depart_date.month_name']}"
+                parts.append(f"ngày {date_str}")
+            elif "depart_date.day_name" in filled:
                 parts.append(f"vào {filled['depart_date.day_name']}")
+            elif "depart_date.today_relative" in filled:
+                parts.append(f"vào {filled['depart_date.today_relative']}")
+            if "depart_time.time" in filled:
+                parts.append(f"lúc {filled['depart_time.time']}")
             if "airline_name" in filled:
                 parts.append(f"hãng {filled['airline_name']}")
             if "class_type" in filled:
                 parts.append(f"hạng {filled['class_type']}")
+            if "round_trip" in filled:
+                parts.append(f"loại vé {filled['round_trip']}")
 
             summary = ", ".join(parts) if parts else "thông tin đã cung cấp"
             return (
@@ -84,16 +95,16 @@ class TemplateNLGAdapter:
             )
 
         if action == PolicyAction.PROVIDE_INFO:
-            return "Đây là thông tin bạn yêu cầu."
+            return (
+                "Yêu cầu đặt vé của bạn đã được xử lý. "
+                "Bạn cần đặt thêm chuyến bay khác không?"
+            )
 
         if action == PolicyAction.ESCALATE:
             return (
                 "Xin lỗi, tôi không thể xử lý yêu cầu này. "
                 "Tôi sẽ chuyển bạn đến nhân viên hỗ trợ."
             )
-
-        if action == PolicyAction.FAQ:
-            return "Tôi sẽ tìm câu trả lời cho bạn."
 
         if action == PolicyAction.CLARIFY:
             return "Xin lỗi, tôi chưa hiểu rõ. Bạn có thể nói lại được không?"

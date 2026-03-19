@@ -5,8 +5,8 @@ Responsibilities:
   2. Accept streaming audio chunks into a per-session asyncio Queue.
   3. When ``audio.end`` is received, drain the Queue and pass the audio stream
      to :class:`~src.application.use_cases.stream_conversation.StreamConversationUseCase`.
-  4. Detect barge-in: if the caller sends new audio while the AI is generating
-     a response, publish a cancellation signal to the Redis Pub/Sub channel.
+  4. Detect barge-in: if the caller sends new audio while the AI is
+     generating a response, publish a cancellation signal via Redis Pub/Sub.
   5. On ``session.end`` or abrupt WebSocket disconnect, flush in-flight TTS,
      persist all Message records to PostgreSQL, transition the *CallSession*
      to *ended*, and enqueue background tasks (claim extraction, reminder
@@ -28,11 +28,6 @@ from src.domain.errors import SessionNotFoundError
 from src.domain.value_objects.session_state import SessionState
 
 if TYPE_CHECKING:
-
-    from fastapi import BackgroundTasks
-
-    from src.application.use_cases.extract_claims import ExtractClaimsUseCase
-    from src.application.use_cases.generate_reminder import GenerateReminderUseCase
     from src.application.use_cases.stream_conversation import (
         SendBinaryFn,
         SendTextFn,
@@ -93,15 +88,11 @@ class HandleCallUseCase:
         session_factory: Any,  # async_sessionmaker[AsyncSession]  # noqa: ANN401
         redis: RedisClient,
         stream_conversation: StreamConversationUseCase,
-        extract_claims: ExtractClaimsUseCase | None = None,
-        generate_reminders: GenerateReminderUseCase | None = None,
         tod_pipeline: TODPipelineUseCase | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._redis = redis
         self._stream = stream_conversation
-        self._extract_claims = extract_claims
-        self._generate_reminders = generate_reminders
         self._tod_pipeline = tod_pipeline
 
         # Per-session audio queues
@@ -209,11 +200,11 @@ class HandleCallUseCase:
         send_text: SendTextFn,
         send_binary: SendBinaryFn,
     ) -> None:
-        """Signal end-of-audio and run the STT→LLM→TTS pipeline.
+        """Signal end-of-audio and run the STT→TOD→TTS pipeline.
 
         Signals the audio queue with the sentinel value, then runs
         :meth:`StreamConversationUseCase.run` with the accumulated audio
-        and conversations history from Redis.
+        and conversation history from Redis.
         """
         queue = self._audio_queues.get(session_id)
         if queue is None:
@@ -237,7 +228,7 @@ class HandleCallUseCase:
             otel_token = None
 
         try:
-            ai_text = await self._stream.run(
+            user_transcript, ai_text = await self._stream.run(
                 session_id=uuid.UUID(session_id),
                 audio_stream=audio_gen,
                 conversation_history=conversation_history,
@@ -254,14 +245,49 @@ class HandleCallUseCase:
         # Re-create a fresh queue for the next turn
         self._audio_queues[session_id] = asyncio.Queue()
 
-        if ai_text:
-            # Buffer the AI response for context in the next turn
-            import json
+        # Buffer messages for DB persistence at teardown (for post-call dashboard)
+        from src.domain.entities.message import Message
+        from src.domain.value_objects.speaker_role import SpeakerRole
 
-            await self._redis.push_to_buffer(
-                session_id,
-                json.dumps({"role": "assistant", "content": ai_text}),
+        pending = self._pending_messages.setdefault(session_id, [])
+        seq = len(pending) + 1
+
+        import json
+
+        if user_transcript:
+            pending.append(
+                Message.create(
+                    session_id=uuid.UUID(session_id),
+                    role=SpeakerRole.user,
+                    content=user_transcript,
+                    sequence_number=seq,
+                )
             )
+            seq += 1
+
+            # Buffer user text for Redis conversation context
+            with contextlib.suppress(Exception):
+                await self._redis.push_to_buffer(
+                    session_id,
+                    json.dumps({"role": "user", "content": user_transcript}),
+                )
+
+        if ai_text:
+            pending.append(
+                Message.create(
+                    session_id=uuid.UUID(session_id),
+                    role=SpeakerRole.ai,
+                    content=ai_text,
+                    sequence_number=seq,
+                )
+            )
+
+            # Buffer the AI response for context in the next turn
+            with contextlib.suppress(Exception):
+                await self._redis.push_to_buffer(
+                    session_id,
+                    json.dumps({"role": "assistant", "content": ai_text}),
+                )
 
     # ------------------------------------------------------------------ #
     # Session teardown                                                     #
@@ -270,15 +296,20 @@ class HandleCallUseCase:
     async def teardown(
         self,
         session_id: str,
-        background_tasks: BackgroundTasks | None = None,
         *,
         state: SessionState = SessionState.ended,
     ) -> None:
         """Flush, persist messages, transition session state.
 
-        This method is safe to call multiple times; it is idempotent after
-        first completion.
+        Idempotent: second call is a no-op if messages were already flushed.
         """
+        # Idempotency guard: skip if already torn down (no pending state)
+        has_pending = session_id in self._pending_messages
+        has_queue = session_id in self._audio_queues
+        if not has_pending and not has_queue:
+            logger.info("teardown_already_complete", session_id=session_id)
+            return
+
         logger.info("session_teardown", session_id=session_id, new_state=state)
 
         tracer = _get_tracer()
@@ -289,11 +320,13 @@ class HandleCallUseCase:
 
             # Cancel any in-progress AI response
             if session_id in self._ai_responding:
-                await self._redis.publish_barge_in(session_id)
+                with contextlib.suppress(Exception):
+                    await self._redis.publish_barge_in(session_id)
                 self._ai_responding.discard(session_id)
 
-            # Remove presence marker
-            await self._redis.mark_absent(session_id)
+            # Remove presence marker (graceful on Redis failure)
+            with contextlib.suppress(Exception):
+                await self._redis.mark_absent(session_id)
 
             # Emit WS disconnection metric
             import contextlib as _cl
@@ -322,35 +355,18 @@ class HandleCallUseCase:
             except Exception:
                 logger.exception("teardown_db_error", session_id=session_id)
 
-            # Enqueue background tasks (claim extraction, reminders — Phase 5/6)
-            if background_tasks is not None and self._extract_claims is not None:
-                # T047 — Claim extraction (non-blocking; MUST NOT await result)
-                background_tasks.add_task(
-                    self._extract_claims.execute,
-                    uuid.UUID(session_id),
-                )
-                logger.debug("claim_extraction_enqueued", session_id=session_id)
-                # T052 — Reminder generation (non-blocking; independent of claim extraction)
-            if background_tasks is not None and self._generate_reminders is not None:
-                background_tasks.add_task(
-                    self._generate_reminders.execute,
-                    uuid.UUID(session_id),
-                )
-                logger.debug("reminder_generation_enqueued", session_id=session_id)
-
             # Cleanup per-session state
             self._audio_queues.pop(session_id, None)
+
+            # Free TOD pipeline dialogue state for this session
+            if self._tod_pipeline is not None:
+                self._tod_pipeline.clear_state(session_id)
 
         logger.info("session_teardown_complete", session_id=session_id)
 
     # ------------------------------------------------------------------ #
-    # Message buffering helpers                                            #
+    # Conversation history                                                 #
     # ------------------------------------------------------------------ #
-
-    def buffer_message(self, session_id: str, message: Message) -> None:
-        """Buffer a *Message* for batch persistence at teardown time."""
-        buf = self._pending_messages.setdefault(session_id, [])
-        buf.append(message)
 
     async def _build_conversation_history(
         self, session_id: str
@@ -358,7 +374,12 @@ class HandleCallUseCase:
         """Read the Redis short-term buffer and deserialise into message dicts."""
         import json
 
-        turns = await self._redis.get_buffer(session_id)
+        try:
+            turns = await self._redis.get_buffer(session_id)
+        except Exception:
+            logger.warning("redis_buffer_read_failed", session_id=session_id)
+            return []
+
         history: list[dict[str, str]] = []
         for turn_json in turns:
             try:

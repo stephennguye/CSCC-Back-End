@@ -33,22 +33,7 @@ if TYPE_CHECKING:
     from src.infrastructure.cache.redis_client import RedisClient
 
 
-from fastapi import FastAPI, Request, Response, status
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
-
-from src.domain.errors import (
-    ClaimExtractionError,
-    LLMFallbackExhaustedError,
-    LLMTimeoutError,
-    PayloadValidationError,
-    PersistenceError,
-    PromptInjectionDetectedError,
-    RAGGroundingError,
-    SessionAlreadyEndedError,
-    SessionNotFoundError,
-    TranscriptionError,
-)
+from fastapi import FastAPI, Request, Response
 
 # ── Context variable for session_id span correlation ─────────────────────────
 
@@ -179,140 +164,10 @@ async def _request_id_middleware(
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Domain error → HTTP status code mapping
+# Application factory
 # ════════════════════════════════════════════════════════════════════════════
 
 _log = structlog.get_logger(__name__)
-
-
-def _make_error_response(code: str, message: str, status_code: int) -> JSONResponse:
-    return JSONResponse(
-        status_code=status_code,
-        content={"error": {"code": code, "message": message}},
-    )
-
-
-def _register_exception_handlers(app: FastAPI) -> None:
-    @app.exception_handler(RequestValidationError)
-    async def handle_request_validation(
-        request: Request, exc: RequestValidationError
-    ) -> JSONResponse:
-        """Return a structured error envelope for Pydantic v2 validation failures.
-
-        Converts FastAPI / Pydantic validation errors to the standard
-        ``{"error": {"code": ..., "message": ..., "details": [...]}}`` envelope
-        so clients always receive a consistent error shape (FR-023).
-        """
-        details = [
-            {
-                "field": ".".join(str(loc) for loc in e.get("loc", [])),
-                "issue": e.get("msg", ""),
-            }
-            for e in exc.errors()
-        ]
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={
-                "error": {
-                    "code": "INVALID_PAYLOAD",
-                    "message": "Request body validation failed.",
-                    "details": details,
-                }
-            },
-        )
-
-    @app.exception_handler(SessionNotFoundError)
-    async def handle_session_not_found(
-        request: Request, exc: SessionNotFoundError
-    ) -> JSONResponse:
-        return _make_error_response("SESSION_NOT_FOUND", str(exc), status.HTTP_404_NOT_FOUND)
-
-    @app.exception_handler(SessionAlreadyEndedError)
-    async def handle_session_ended(
-        request: Request, exc: SessionAlreadyEndedError
-    ) -> JSONResponse:
-        return _make_error_response(
-            "SESSION_ENDED", str(exc), status.HTTP_409_CONFLICT
-        )
-
-    @app.exception_handler(PayloadValidationError)
-    async def handle_payload_validation(
-        request: Request, exc: PayloadValidationError
-    ) -> JSONResponse:
-        return _make_error_response(
-            "INVALID_PAYLOAD", str(exc), status.HTTP_400_BAD_REQUEST
-        )
-
-    @app.exception_handler(PromptInjectionDetectedError)
-    async def handle_prompt_injection(
-        request: Request, exc: PromptInjectionDetectedError
-    ) -> JSONResponse:
-        _log.warning("prompt_injection_detected", detail=str(exc))
-        return _make_error_response(
-            "PROMPT_INJECTION_DETECTED",
-            "Request blocked by security policy.",
-            status.HTTP_400_BAD_REQUEST,
-        )
-
-    @app.exception_handler(LLMTimeoutError)
-    async def handle_llm_timeout(
-        request: Request, exc: LLMTimeoutError
-    ) -> JSONResponse:
-        return _make_error_response(
-            "LLM_TIMEOUT", str(exc), status.HTTP_503_SERVICE_UNAVAILABLE
-        )
-
-    @app.exception_handler(LLMFallbackExhaustedError)
-    async def handle_llm_fallback_exhausted(
-        request: Request, exc: LLMFallbackExhaustedError
-    ) -> JSONResponse:
-        return _make_error_response(
-            "LLM_FALLBACK_EXHAUSTED",
-            "All LLM providers are currently unavailable.",
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
-
-    @app.exception_handler(TranscriptionError)
-    async def handle_transcription_error(
-        request: Request, exc: TranscriptionError
-    ) -> JSONResponse:
-        return _make_error_response(
-            "TRANSCRIPTION_ERROR", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-    @app.exception_handler(RAGGroundingError)
-    async def handle_rag_grounding(
-        request: Request, exc: RAGGroundingError
-    ) -> JSONResponse:
-        return _make_error_response(
-            "RAG_GROUNDING_ERROR", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-    @app.exception_handler(ClaimExtractionError)
-    async def handle_claim_extraction(
-        request: Request, exc: ClaimExtractionError
-    ) -> JSONResponse:
-        return _make_error_response(
-            "CLAIM_EXTRACTION_ERROR",
-            str(exc),
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
-
-    @app.exception_handler(PersistenceError)
-    async def handle_persistence(
-        request: Request, exc: PersistenceError
-    ) -> JSONResponse:
-        _log.error("persistence_error", detail=str(exc))
-        return _make_error_response(
-            "PERSISTENCE_ERROR",
-            "A storage operation failed. Please try again.",
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# Application factory
-# ════════════════════════════════════════════════════════════════════════════
 
 
 def create_app() -> FastAPI:
@@ -335,8 +190,9 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="AI Call Center Backend",
         description=(
-            "Real-time AI-powered call center backend: WebSocket audio streaming, "
-            "RAG-grounded LLM responses, structured claim extraction, and reminder generation."
+            "Real-time Vietnamese AI call center backend: WebSocket audio streaming, "
+            "Task-Oriented Dialogue pipeline (NLU → DST → Policy → NLG), "
+            "structured claim extraction, and reminder generation."
         ),
         version="0.1.0",
         docs_url="/docs",
@@ -357,13 +213,15 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Middleware
+    # Request-ID middleware
     from starlette.middleware.base import BaseHTTPMiddleware
 
     app.add_middleware(BaseHTTPMiddleware, dispatch=_request_id_middleware)
 
-    # Exception handlers
-    _register_exception_handlers(app)
+    # Exception handlers (extracted to interface.exception_handlers)
+    from src.interface.exception_handlers import register_exception_handlers
+
+    register_exception_handlers(app)
 
     # Tracing (no-op when OTEL env var is absent)
     _configure_tracing(app)
@@ -371,37 +229,10 @@ def create_app() -> FastAPI:
     # Prometheus metrics (gracefully skipped if package not installed)
     _configure_metrics(app)
 
-    # ── Phase 3 Routers ───────────────────────────────────────────────────
-    from src.interface.rest.documents import router as documents_router
-    from src.interface.rest.sessions import router as sessions_router
-    from src.interface.ws.call_controller import router as ws_router
+    # ── Routers (centralized in interface.api_router) ─────────────────────
+    from src.interface.api_router import register_routers
 
-    API_PREFIX = "/api/v1"  # noqa: N806
-    app.include_router(sessions_router, prefix=API_PREFIX)
-    app.include_router(documents_router, prefix=API_PREFIX)
-    app.include_router(ws_router)
-
-    # ── Phase 5 Routers ───────────────────────────────────────────────────────
-    from src.interface.rest.claims import router as claims_router
-
-    app.include_router(claims_router, prefix=API_PREFIX)
-
-    # ── Phase 6 Routers ───────────────────────────────────────────────────
-    from src.interface.rest.reminders import router as reminders_router
-
-    app.include_router(reminders_router, prefix=API_PREFIX)
-
-    # ── TOD Dialogue Router ─────────────────────────────────────────────
-    from src.interface.rest.dialogue import router as dialogue_router
-
-    app.include_router(dialogue_router)
-
-    # ── Phase 7 Routers ───────────────────────────────────────────────
-    from src.interface.rest.conversations import router as conversations_router
-    from src.interface.rest.health import router as health_router
-
-    app.include_router(conversations_router, prefix=API_PREFIX)
-    app.include_router(health_router, prefix=API_PREFIX)
+    register_routers(app)
 
     # ── Rate limiting middleware (T058) ────────────────────────────────────
     from src.interface.middleware.rate_limiter import RateLimitMiddleware
@@ -418,26 +249,18 @@ def create_app() -> FastAPI:
 
 async def _startup(app: FastAPI) -> None:
     """Initialise all infrastructure singletons and wire DI."""
-    from src.application.use_cases.extract_claims import ExtractClaimsUseCase
-    from src.application.use_cases.generate_reminder import GenerateReminderUseCase
     from src.application.use_cases.handle_call import HandleCallUseCase
-    from src.application.use_cases.ingest_document import IngestDocumentUseCase
-    from src.application.use_cases.retrieve_knowledge import RetrieveKnowledgeUseCase
     from src.application.use_cases.stream_conversation import StreamConversationUseCase
     from src.application.use_cases.tod_pipeline import TODPipelineUseCase
-    from src.domain.services.prompt_sanitizer import PromptSanitizer
     from src.infrastructure.cache.redis_client import RedisClient
-    from src.infrastructure.db.chroma.vector_repo import ChromaVectorRepository
     from src.infrastructure.db.postgres.session import AsyncSessionFactory
-    from src.infrastructure.llm.huggingface_client import HuggingFaceLLMAdapter
-    from src.infrastructure.llm.openai_client import OpenAILLMAdapter
     from src.infrastructure.dst.hybrid_dst_adapter import HybridDSTAdapter
     from src.infrastructure.nlg.template_nlg_adapter import TemplateNLGAdapter
-    from src.infrastructure.nlu.phobert_nlu_adapter import PhoBERTNLUAdapter
+    from src.infrastructure.nlu.jointbert_nlu_adapter import JointBERTNLUAdapter
     from src.infrastructure.policy.rule_policy_adapter import RulePolicyAdapter
     from src.infrastructure.stt.faster_whisper_adapter import FasterWhisperAdapter
-    from src.infrastructure.tts.coqui_tts_adapter import CoquiTTSAdapter
     from src.infrastructure.tts.edge_tts_adapter import EdgeTTSAdapter
+    from src.infrastructure.tts.gtts_adapter import GTTSAdapter
 
     # ── Infrastructure singletons ──────────────────────────────────────────
     redis = RedisClient()
@@ -445,24 +268,21 @@ async def _startup(app: FastAPI) -> None:
     app.state.redis = redis
 
     stt = FasterWhisperAdapter()
-    llm_primary = OpenAILLMAdapter()
-    llm_fallback = HuggingFaceLLMAdapter()
-    tts_primary = CoquiTTSAdapter()
-    tts_fallback = EdgeTTSAdapter()
-    sanitizer = PromptSanitizer()
+    tts_primary = EdgeTTSAdapter()
+    tts_fallback = GTTSAdapter()
 
-    # ── Phase 4: RAG infrastructure ──────────────────────────────────────
-    vector_repo = ChromaVectorRepository()
-    retrieve_knowledge = RetrieveKnowledgeUseCase(vector_repository=vector_repo)
-    ingest_document = IngestDocumentUseCase(
-        vector_repository=vector_repo,
-        session_factory=AsyncSessionFactory,
-    )
-    app.state.ingest_document = ingest_document
-    app.state.document_repo_factory = AsyncSessionFactory
+    # Pre-load the STT model at startup so the first call isn't delayed
+    # by a ~50s model download.
+    try:
+        from src.infrastructure.stt.faster_whisper_adapter import _get_model
+        _log.info("preloading_stt_model")
+        await _get_model()
+        _log.info("stt_model_preloaded")
+    except Exception as exc:
+        _log.warning("stt_model_preload_failed", error=str(exc))
 
     # ── TOD pipeline infrastructure ──────────────────────────────────────
-    nlu_adapter = PhoBERTNLUAdapter()
+    nlu_adapter = JointBERTNLUAdapter()
     dst_adapter = HybridDSTAdapter()
     policy_adapter = RulePolicyAdapter()
     nlg_adapter = TemplateNLGAdapter()
@@ -478,37 +298,18 @@ async def _startup(app: FastAPI) -> None:
     # ── Use cases ──────────────────────────────────────────────────────────
     stream_conversation = StreamConversationUseCase(
         stt=stt,
-        llm_primary=llm_primary,
-        llm_fallback=llm_fallback,
+        tod_pipeline=tod_pipeline,
         tts_primary=tts_primary,
         tts_fallback=tts_fallback,
-        prompt_sanitizer=sanitizer,
-        redis=redis,
-        retrieve_knowledge=retrieve_knowledge,
-        tod_pipeline=tod_pipeline,
     )
 
-    # ── Phase 5: Claim extraction ────────────────────────────────────────
-    extract_claims = ExtractClaimsUseCase(
-        llm=llm_primary,
-        session_factory=AsyncSessionFactory,
-    )
-    app.state.extract_claims = extract_claims
-
-    # ── Phase 6: Reminder generation ────────────────────────────────────────
-    generate_reminders = GenerateReminderUseCase(
-        llm=llm_primary,
-        session_factory=AsyncSessionFactory,
-    )
-    app.state.generate_reminders = generate_reminders
     app.state.session_factory = AsyncSessionFactory
 
     handle_call = HandleCallUseCase(
         session_factory=AsyncSessionFactory,
         redis=redis,
         stream_conversation=stream_conversation,
-        extract_claims=extract_claims,
-        generate_reminders=generate_reminders,
+        tod_pipeline=tod_pipeline,
     )
     app.state.handle_call = handle_call
 

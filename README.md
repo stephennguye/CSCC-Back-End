@@ -60,12 +60,11 @@ The system handles end-to-end Vietnamese voice conversations for airline booking
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │  HandleCall → StreamConversation → TODPipeline             │  │
-│  │              RetrieveKnowledge (FAQ fallback)              │  │
 │  │              ExtractClaims → GenerateReminder              │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
 │  Ports: NLUPort | DSTPort | PolicyPort | NLGPort                │
-│         LLMPort | STTPort | TTSPort                             │
+│         STTPort | TTSPort                                      │
 └────────────────────────────────┬────────────────────────────────┘
                                  │
 ┌────────────────────────────────▼────────────────────────────────┐
@@ -73,23 +72,22 @@ The system handles end-to-end Vietnamese voice conversations for airline booking
 │                                                                  │
 │  Entities: DialogueState | CallSession | Message | Claim        │
 │  Value Objects: NLUResult | SlotValue | PolicyDecision          │
-│  Enums: PolicyAction (clarify|request_slot|confirm|execute|faq) │
+│  Enums: PolicyAction (clarify|request_slot|confirm|execute)     │
 │  Constants: BOOKING_SLOTS (10) | REQUIRED_SLOTS (3)            │
-│  Services: PromptSanitizer                                      │
+│                                                                  │
 └────────────────────────────────┬────────────────────────────────┘
                                  │
 ┌────────────────────────────────▼────────────────────────────────┐
 │                   INFRASTRUCTURE LAYER                           │
 │                                                                  │
-│  NLU:    PhoBERT adapter (keyword mock → ONNX JointIDSF)       │
+│  NLU:    JointBERT + PhoBERT (trained on PhoATIS)              │
 │  DST:    HybridDSTAdapter (rule-based + confidence gating)      │
 │  Policy: RulePolicyAdapter (decision tree)                      │
 │  NLG:    TemplateNLGAdapter (~25 Vietnamese templates)          │
 │                                                                  │
-│  STT: faster-whisper  |  TTS: Coqui / edge-tts                 │
-│  LLM: OpenAI / HuggingFace (FAQ fallback)                      │
+│  STT: faster-whisper (small, Vietnamese)                        │
+│  TTS: edge-tts / gTTS                                          │
 │  DB:  PostgreSQL (asyncpg)  |  Cache: Redis                    │
-│  RAG: ChromaDB + BAAI/bge-m3 (FAQ knowledge base)              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -103,7 +101,7 @@ The system handles end-to-end Vietnamese voice conversations for airline booking
 
 ## TOD Pipeline
 
-The core innovation: a **4-stage Task-Oriented Dialogue** pipeline replacing the previous RAG-only approach for booking flows.
+The core innovation: a **4-stage Task-Oriented Dialogue** pipeline for booking flows.
 
 ### Pipeline Stages
 
@@ -162,8 +160,6 @@ User utterance: "Tôi muốn đặt vé đi Đà Nẵng ngày thứ sáu"
 ### Policy Decision Tree
 
 ```
-Intent is FAQ? ──────────────── → action: faq (route to RAG+LLM)
-        │ no
 Confidence < 0.5? ──────────── → action: clarify
         │ no
 Missing required slots? ─────── → action: request_slot
@@ -200,11 +196,9 @@ The NLG adapter uses ~25 polite Vietnamese templates with register markers:
 
 | Component | Primary | Fallback |
 |---|---|---|
-| STT | faster-whisper | — |
-| TTS | Coqui TTS | edge-tts |
-| LLM (FAQ) | OpenAI gpt-4-turbo | HuggingFace Mistral-7B |
-| Embeddings | BAAI/bge-m3 | — |
-| NLU | PhoBERT keyword adapter | ONNX JointIDSF (planned) |
+| STT | faster-whisper (small model) | — |
+| TTS | edge-tts | gTTS |
+| NLU | JointBERT + PhoBERT (trained) | Keyword fallback |
 
 ### Data
 
@@ -212,7 +206,6 @@ The NLG adapter uses ~25 polite Vietnamese templates with register markers:
 |---|---|---|
 | Transactional | PostgreSQL 15+ (asyncpg) | Sessions, transcripts, claims |
 | Cache | Redis 7+ | Ephemeral state, rate limits |
-| Vector store | ChromaDB | RAG knowledge base |
 
 ### Observability
 
@@ -236,12 +229,8 @@ src/
 │   │   ├── call_session.py          # CallSession entity
 │   │   ├── claim.py                 # Claim entity
 │   │   ├── message.py               # Message (transcript turn)
-│   │   ├── document.py              # Knowledge base document
-│   │   ├── embedding.py             # Vector chunk
 │   │   └── reminder.py              # Reminder entity
 │   ├── repositories/                # Abstract repository interfaces
-│   ├── services/
-│   │   └── prompt_sanitizer.py      # Prompt injection defense
 │   ├── value_objects/               # ConfidenceScore, SessionState, SpeakerRole
 │   └── errors.py                    # Domain-specific errors
 │
@@ -251,21 +240,17 @@ src/
 │   │   ├── dst_port.py              # DSTPort protocol
 │   │   ├── policy_port.py           # PolicyPort protocol
 │   │   ├── nlg_port.py              # NLGPort protocol
-│   │   ├── llm_port.py              # LLMPort protocol
 │   │   ├── stt_port.py              # STTPort protocol
 │   │   └── tts_port.py              # TTSPort protocol
 │   └── use_cases/
 │       ├── tod_pipeline.py          # TODPipelineUseCase (NLU→DST→Policy→NLG)
 │       ├── handle_call.py           # Call lifecycle orchestrator
-│       ├── stream_conversation.py   # Real-time STT→TOD→TTS pipeline
-│       ├── retrieve_knowledge.py    # RAG for FAQ intents
-│       ├── extract_claims.py        # Post-call claim extraction
-│       ├── generate_reminder.py     # Post-call reminder generation
-│       └── ingest_document.py       # Knowledge base ingestion
+│       └── stream_conversation.py   # Real-time STT→TOD→TTS pipeline
 │
 ├── infrastructure/
 │   ├── nlu/
-│   │   └── phobert_nlu_adapter.py   # Keyword-based NLU (→ ONNX JointIDSF)
+│   │   ├── jointbert_nlu_adapter.py # JointBERT + PhoBERT NLU (trained model)
+│   │   └── phobert_nlu_adapter.py   # Keyword-based fallback NLU
 │   ├── dst/
 │   │   └── hybrid_dst_adapter.py    # Rule-based DST with confidence gating
 │   ├── policy/
@@ -277,12 +262,8 @@ src/
 │   ├── tts/
 │   │   ├── coqui_tts_adapter.py
 │   │   └── edge_tts_adapter.py
-│   ├── llm/
-│   │   ├── openai_client.py
-│   │   └── huggingface_client.py
 │   ├── db/
 │   │   ├── postgres/                # SQLAlchemy models & repos
-│   │   └── chroma/                  # Vector store repo
 │   ├── cache/
 │   │   └── redis_client.py
 │   ├── observability/               # Metrics, circuit breaker
@@ -295,7 +276,6 @@ src/
     │   ├── conversations.py         # GET /api/v1/conversations/{id}/history
     │   ├── claims.py                # GET /api/v1/conversations/{id}/claims
     │   ├── reminders.py             # GET /api/v1/conversations/{id}/reminders
-    │   ├── documents.py             # POST /api/v1/documents/ingest
     │   └── health.py                # GET /api/v1/health
     ├── ws/
     │   └── call_controller.py       # WebSocket call handler
@@ -353,7 +333,6 @@ Response:
 | GET | `/api/v1/conversations/{id}/history` | Conversation transcript |
 | GET | `/api/v1/conversations/{id}/claims` | Extracted claims |
 | GET | `/api/v1/conversations/{id}/reminders` | Generated reminders |
-| POST | `/api/v1/documents/ingest` | Ingest knowledge base docs |
 | GET | `/api/v1/health` | Service health check |
 
 ---
@@ -419,7 +398,7 @@ WS ws://host:8000/ws/calls/{session_id}
 
 - Python 3.12+
 - Docker & Docker Compose (for PostgreSQL, Redis)
-- API keys: OpenAI (or HuggingFace) for FAQ fallback
+- Trained JointBERT model in `models/jointbert/` (see NLU Model section)
 
 ### Setup
 
@@ -451,21 +430,16 @@ uvicorn src.main:create_app --reload --host 0.0.0.0 --port 8000
 Environment variables (`.env`):
 
 ```bash
-# TOD Pipeline (no API keys needed for core booking flow)
-# The NLU/DST/Policy/NLG adapters are self-contained
+# TOD Pipeline — no API keys needed for core booking flow
+# NLU (JointBERT), DST, Policy, NLG are all local
 
-# LLM (FAQ fallback only)
-OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4-turbo
-HUGGINGFACE_API_KEY=hf_...
+# JointBERT model (auto-detected from models/jointbert/)
+JOINTBERT_MODEL_DIR=models/jointbert    # default
+JOINTBERT_HF_MODEL=vinai/phobert-base-v2
 
-# Speech
-COQUI_MODEL=tts_models/vi/...
-EDGE_TTS_FALLBACK=true
-
-# RAG (FAQ knowledge base)
-VECTOR_STORE_PATH=./data/chroma
-EMBEDDING_MODEL=BAAI/bge-m3
+# STT (faster-whisper)
+FASTER_WHISPER_MODEL=small              # base | small | medium
+FASTER_WHISPER_DEVICE=cpu               # cpu | cuda
 
 # Database
 POSTGRES_URL=postgresql+asyncpg://user:password@localhost/cscc
@@ -523,19 +497,38 @@ kubectl apply -f k8s/
 | TTS (Coqui) | 400ms | 300–400ms |
 | Margin | 150ms | — |
 
-The TOD pipeline is significantly faster than the RAG+LLM path since it uses local rule-based processing instead of external API calls.
+The TOD pipeline uses local rule-based processing instead of external API calls, keeping latency minimal.
 
 ---
+
+## NLU Model
+
+The NLU stage uses a trained **JointBERT** model (JointIDSF architecture with `vinai/phobert-base-v2` encoder) for joint intent classification + slot filling on the PhoATIS dataset:
+
+| Metric | Score |
+|---|---|
+| Intent Accuracy | ~97% |
+| Slot F1 | ~95% |
+| Sentence Accuracy | ~86% |
+
+**Model artifacts** in `models/jointbert/`:
+- `best_jointbert.pt` — PyTorch checkpoint (~1.5 GB, git-ignored)
+- `intent2id.json` — 25 intent classes
+- `slot2id.json` — 142 BIO slot labels
+- `intent_labels.txt`, `slot_labels.txt` — human-readable labels
+
+On startup, the adapter loads the checkpoint and falls back to the keyword-based `PhoBERTNLUAdapter` if the model file is missing.
 
 ## Roadmap
 
-- [ ] Train JointIDSF + PhoBERT on PhoATIS dataset → replace keyword NLU adapter
-- [ ] Export ONNX model for production inference
-- [ ] Add Streamlit demo UI (Phase 5)
-- [ ] Evaluation metrics: intent accuracy, slot F1, task completion rate
+- [x] Train JointIDSF + PhoBERT on PhoATIS dataset
+- [x] Integrate trained model into real-time TOD pipeline
+- [ ] Export ONNX model for faster CPU inference
+- [ ] Server-side MP3→PCM conversion for TTS audio streaming
 - [ ] Vietnamese TTS voice fine-tuning
+- [ ] Evaluation dashboard with per-session metrics
 
 ---
 
-**Status**: In Development
-**Last Updated**: 2026-03-13
+**Status**: MVP Complete
+**Last Updated**: 2026-03-18

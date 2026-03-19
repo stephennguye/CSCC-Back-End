@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-ALLOWED_CODECS: frozenset[str] = frozenset({"pcm_16khz_mono", "opus_48khz"})
+ALLOWED_CODECS: frozenset[str] = frozenset({"pcm_16khz_mono"})
 MAX_DECODED_BYTES: int = 4096  # 4 KB
 
 
