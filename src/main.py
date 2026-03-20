@@ -282,7 +282,9 @@ async def _startup(app: FastAPI) -> None:
     nlu_adapter = JointBERTNLUAdapter()
     try:
         _log.info("preloading_nlu_model")
-        await asyncio.get_running_loop().run_in_executor(None, nlu_adapter._load_model)
+        ok = await asyncio.get_running_loop().run_in_executor(None, nlu_adapter._load_model)
+        if ok:
+            nlu_adapter._loaded = True
         _log.info("nlu_model_preloaded")
     except Exception as exc:
         _log.warning("nlu_model_preload_failed", error=str(exc))

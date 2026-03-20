@@ -49,19 +49,27 @@ def _extract_token(websocket: WebSocket) -> str | None:
     return websocket.query_params.get("token")
 
 
-async def _send_text(websocket: WebSocket, frame: dict[str, Any]) -> None:
+async def _send_text(websocket: WebSocket, frame: dict[str, Any], *, closed_flag: dict[str, bool] | None = None) -> None:
     """Serialize *frame* to JSON and send as a text WebSocket message."""
+    if closed_flag and closed_flag.get("closed"):
+        return
     try:
         await websocket.send_text(json.dumps(frame, default=str))
     except Exception as exc:
+        if closed_flag is not None:
+            closed_flag["closed"] = True
         logger.warning("ws_send_text_error", frame_type=frame.get("type"), error=str(exc))
 
 
-async def _send_binary(websocket: WebSocket, data: bytes) -> None:
+async def _send_binary(websocket: WebSocket, data: bytes, *, closed_flag: dict[str, bool] | None = None) -> None:
     """Send raw audio bytes as a binary WebSocket message."""
+    if closed_flag and closed_flag.get("closed"):
+        return
     try:
         await websocket.send_bytes(data)
     except Exception as exc:
+        if closed_flag is not None:
+            closed_flag["closed"] = True
         logger.warning("ws_send_binary_error", error=str(exc), data_len=len(data))
 
 
@@ -184,11 +192,11 @@ def _adapt_outbound_frame(frame: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-async def _send_adapted(websocket: WebSocket, frame: dict[str, Any]) -> None:
+async def _send_adapted(websocket: WebSocket, frame: dict[str, Any], *, closed_flag: dict[str, bool] | None = None) -> None:
     """Adapt a BE frame and send it; silently drop frames with no FE equivalent."""
     adapted = _adapt_outbound_frame(frame)
     if adapted is not None:
-        await _send_text(websocket, adapted)
+        await _send_text(websocket, adapted, closed_flag=closed_flag)
 
 
 async def _send_error(
@@ -322,11 +330,12 @@ async def ws_call_handler(
             if fe_type == "audio_end":
                 # VAD detected end-of-speech — trigger the STT→TOD→TTS pipeline
                 logger.info("audio_end_vad", session_id=session_id)
+                ws_closed: dict[str, bool] = {"closed": False}
                 await _send_session_state(websocket, session_id, "ai_thinking", "listening")
                 should_end = await handle_call.handle_audio_end(
                     session_id,
-                    send_text=lambda d: _send_adapted(websocket, d),
-                    send_binary=lambda b: _send_binary(websocket, b),
+                    send_text=lambda d: _send_adapted(websocket, d, closed_flag=ws_closed),
+                    send_binary=lambda b: _send_binary(websocket, b, closed_flag=ws_closed),
                 )
                 if should_end:
                     # Farewell detected — auto-end the call after TTS finishes
@@ -402,10 +411,11 @@ async def _dispatch_text_frame(
         await _send_session_state(websocket, session_id, "ai_thinking", "listening")
         # Wrap send_text with the adapter so all BE-internal frames are
         # translated to the FE-expected flat format before being sent over the wire.
+        ws_closed: dict[str, bool] = {"closed": False}
         should_end = await handle_call.handle_audio_end(
             session_id,
-            send_text=lambda d: _send_adapted(websocket, d),
-            send_binary=lambda b: _send_binary(websocket, b),
+            send_text=lambda d: _send_adapted(websocket, d, closed_flag=ws_closed),
+            send_binary=lambda b: _send_binary(websocket, b, closed_flag=ws_closed),
         )
         if should_end:
             logger.info("farewell_auto_end", session_id=session_id)

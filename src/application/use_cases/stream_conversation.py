@@ -248,6 +248,9 @@ class StreamConversationUseCase:
         import asyncio
 
         try:
+            # Scale timeout with text length: ~3s per sentence chunk (80 chars)
+            # plus generous buffer for edge_tts latency spikes (up to 10s observed)
+            tts_timeout = max(15.0, len(ai_response_text) / 80 * 5.0 + 10.0)
             await asyncio.wait_for(
                 self._synthesize_and_stream(
                     session_id=session_str,
@@ -256,7 +259,7 @@ class StreamConversationUseCase:
                     send_text=send_text,
                     send_binary=send_binary,
                 ),
-                timeout=15.0,
+                timeout=tts_timeout,
             )
         except TimeoutError:
             logger.warning("tts_timeout", session_id=session_str, text_length=len(ai_response_text))
