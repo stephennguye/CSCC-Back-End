@@ -56,14 +56,24 @@ BOOKING_SLOTS: list[str] = [
     "depart_date.today_relative",
     "depart_time.time",
     "airline_name",
-    "flight_number",
     "class_type",
     "round_trip",
+    "return_date.day_name",
+    "return_date.month_name",
+    "return_date.day_number",
 ]
 
+# Slots the system must collect before confirming.
+# "depart_date" and "return_date" are virtual — satisfied by any sub-slot.
+# "return_date" is conditional — only required when round_trip == "khứ hồi".
 REQUIRED_SLOTS: list[str] = [
     "fromloc.city_name",
     "toloc.city_name",
+    "depart_date",
+    "depart_time.time",
+    "airline_name",
+    "class_type",
+    "round_trip",
 ]
 
 
@@ -95,17 +105,36 @@ class DialogueState:
         return {k: v for k, v in self.slots.items() if v is not None}
 
     def missing_required(self) -> list[str]:
-        """Return required slots that are not yet filled."""
-        return [s for s in REQUIRED_SLOTS if not self.slots.get(s)]
+        """Return required slots that are not yet filled.
+
+        ``depart_date`` is a virtual slot — satisfied when any depart date
+        sub-slot is filled.  ``return_date`` is conditional — only required
+        when ``round_trip`` is set to a round-trip value.
+        """
+        missing = []
+        for s in REQUIRED_SLOTS:
+            if s == "depart_date":
+                if not self._has_date_info("depart_date"):
+                    missing.append(s)
+            elif not self.slots.get(s):
+                missing.append(s)
+
+        # Conditional: return_date required only for round-trip bookings
+        rt = self.slots.get("round_trip")
+        if rt and rt.lower() in ("khứ hồi", "khu hoi", "round trip", "round-trip"):
+            if not self._has_date_info("return_date"):
+                missing.append("return_date")
+
+        return missing
+
+    def _has_date_info(self, prefix: str) -> bool:
+        """Check if at least one date sub-slot with the given prefix is filled."""
+        suffixes = ["day_name", "month_name", "day_number"]
+        return any(self.slots.get(f"{prefix}.{s}") for s in suffixes)
 
     def has_date_info(self) -> bool:
-        """Check if at least one date-related slot is filled."""
-        date_slots = [
-            "depart_date.day_name",
-            "depart_date.month_name",
-            "depart_date.day_number",
-        ]
-        return any(self.slots.get(s) for s in date_slots)
+        """Check if at least one departure date slot is filled."""
+        return self._has_date_info("depart_date")
 
     def to_dict(self) -> dict[str, object]:
         """Serialize to dict for API responses."""

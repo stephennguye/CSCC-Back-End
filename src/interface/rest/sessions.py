@@ -193,6 +193,7 @@ async def create_session(
 )
 async def get_session_summary(
     session_id: str,
+    request: Request,
     session_factory: Any = Depends(get_session_factory),  # noqa: ANN401, B008
 ) -> dict:  # type: ignore[return]
     """Return a single post-call response aggregating transcript, claims and reminders.
@@ -278,32 +279,33 @@ async def get_session_summary(
         for msg in messages
     ]
 
-    # ── Map claims ────────────────────────────────────────────────────────────
-    claims_list: list[dict] = []
-    if claim is not None and claim.schema_version != "not_extractable":
-        claims_list = [
-            {
-                "index": 0,
-                "text": claim.issue_category or claim.requested_action or "Extracted claim",
-                "speaker": "ai",
-                "confidence": float(claim.confidence) if claim.confidence is not None else 1.0,
-                "timestamp": _epoch_ms(claim.extracted_at) or 0,
-            }
-        ]
+    # ── Map booking info from TOD pipeline state or persisted metadata ────────
+    booking: dict[str, object] = {}
 
-    # ── Map reminders ─────────────────────────────────────────────────────────
-    reminders_list = [
-        {
-            "index": idx,
-            "text": r.description,
-            "dueAt": r.target_due_at.isoformat() if r.target_due_at is not None else None,
-        }
-        for idx, r in enumerate(reminders)
-    ]
+    # First try live TOD pipeline state (available during active calls)
+    tod_pipeline = getattr(request.app.state, "tod_pipeline", None)
+    if tod_pipeline is not None:
+        tod_state = tod_pipeline._states.get(session_id)
+        if tod_state is not None:
+            filled = tod_state.filled_slots()
+            booking = {
+                "status": "completed" if tod_state.executed else (
+                    "confirmed" if tod_state.confirmed else "in_progress"
+                ),
+                "turnCount": tod_state.turn_count,
+                "lastIntent": tod_state.intent,
+                "filledSlots": filled,
+                "missingSlots": tod_state.missing_required(),
+                "slotsFilled": len(filled),
+                "slotsTotal": len(tod_state.slots),
+            }
+
+    # Fallback: read booking snapshot from session metadata (persisted at teardown)
+    if not booking and call_session.metadata:
+        booking = call_session.metadata.get("booking", {})
 
     return {
         "session": session_obj,
         "transcript": transcript,
-        "claims": claims_list,
-        "reminders": reminders_list,
+        "booking": booking,
     }

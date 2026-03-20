@@ -128,6 +128,30 @@ class PostgresCallSessionRepository:
                 f"Failed to update state for session {session_id}: {exc}"
             ) from exc
 
+    async def update_metadata(
+        self,
+        session_id: uuid.UUID,
+        metadata: dict,
+    ) -> None:
+        """Update the session's metadata JSONB column (merge with existing)."""
+        try:
+            result = await self._session.execute(
+                select(CallSessionModel).where(CallSessionModel.id == session_id)
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                raise SessionNotFoundError(f"Session {session_id} not found")
+            existing = row.metadata_ or {}
+            existing.update(metadata)
+            row.metadata_ = existing
+            await self._session.flush()
+        except SessionNotFoundError:
+            raise
+        except Exception as exc:
+            raise PersistenceError(
+                f"Failed to update metadata for session {session_id}: {exc}"
+            ) from exc
+
     # ------------------------------------------------------------------ #
     # Message operations                                                   #
     # ------------------------------------------------------------------ #

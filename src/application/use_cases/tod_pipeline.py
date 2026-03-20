@@ -12,7 +12,12 @@ from src.application.ports.dst_port import DSTPort
 from src.application.ports.nlg_port import NLGPort
 from src.application.ports.nlu_port import NLUPort
 from src.application.ports.policy_port import PolicyPort
-from src.domain.entities.dialogue_state import DialogueState, NLUResult, PolicyAction
+from src.domain.entities.dialogue_state import (
+    DialogueState,
+    NLUResult,
+    PolicyAction,
+    PolicyDecision,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -46,6 +51,11 @@ _FAREWELL_PATTERNS: list[str] = [
     "tạm biệt", "tam biet", "bye", "goodbye", "chào tạm biệt",
     "hẹn gặp lại", "hen gap lai",
     "cảm ơn", "cam on", "cám ơn", "xin cảm ơn",
+    "kết thúc cuộc gọi", "ket thuc cuoc goi",
+    "kết thúc", "ket thuc",
+    "ngắt máy", "ngat may",
+    "dừng cuộc gọi", "dung cuoc goi",
+    "end call", "hang up",
 ]
 
 # Whisper often hallucinates short confirmation audio as farewell phrases.
@@ -75,7 +85,13 @@ def _strip_diacritics(text: str) -> str:
 
 
 def _normalize_for_match(text: str) -> str:
-    """Strip punctuation, extra whitespace, and lowercase for keyword matching."""
+    """Strip punctuation, extra whitespace, and lowercase for keyword matching.
+
+    Also applies NFC normalization to handle composed vs decomposed Unicode
+    from different STT engines.
+    """
+    # NFC normalize to ensure consistent Unicode representation
+    text = unicodedata.normalize("NFC", text)
     # Remove trailing/leading punctuation that Whisper appends
     text = re.sub(r"[.,;:!?]+", "", text)
     return " ".join(text.lower().split())
@@ -85,6 +101,7 @@ def _detect_keyword_intent(
     text: str,
     *,
     awaiting_confirmation: bool = False,
+    has_booking: bool = False,
 ) -> str | None:
     """Return an override intent if the text matches a keyword pattern.
 
@@ -93,13 +110,16 @@ def _detect_keyword_intent(
         awaiting_confirmation: True when the policy is in CONFIRM state.
             Used to catch Whisper hallucinations that turn "vâng" into
             "Cảm ơn." etc.
+        has_booking: True when the user has filled slots (booking in progress).
+            Suppresses greet detection so mid-booking greetings don't
+            interrupt the flow.
     """
     clean = _normalize_for_match(text)
     ascii_clean = _strip_diacritics(clean)
 
-    # Only check short utterances (1-6 words) — longer ones are real speech
+    # Only check short utterances (1-10 words) — longer ones are real speech
     word_count = len(clean.split())
-    if word_count > 6:
+    if word_count > 10:
         return None
 
     # ── Affirm (highest priority when awaiting confirmation) ──────────
@@ -132,12 +152,13 @@ def _detect_keyword_intent(
             if clean == pat_norm or ascii_clean == pat_ascii:
                 return "affirm"
 
-    # ── Greet ─────────────────────────────────────────────────────────
-    for pattern in _GREET_PATTERNS:
-        pat_norm = _normalize_for_match(pattern)
-        pat_ascii = _strip_diacritics(pat_norm)
-        if clean == pat_norm or ascii_clean == pat_ascii or clean.startswith(pat_norm):
-            return "greet"
+    # ── Greet — only when not in active booking ─────────────────────
+    if not has_booking:
+        for pattern in _GREET_PATTERNS:
+            pat_norm = _normalize_for_match(pattern)
+            pat_ascii = _strip_diacritics(pat_norm)
+            if clean == pat_norm or ascii_clean == pat_ascii or clean.startswith(pat_norm):
+                return "greet"
 
     # ── Farewell (only when NOT awaiting confirmation) ────────────────
     for pattern in _FAREWELL_PATTERNS:
@@ -147,6 +168,22 @@ def _detect_keyword_intent(
             return "farewell"
 
     return None
+
+
+def _is_farewell_text(text: str) -> bool:
+    """Broad farewell detection using substring matching as a safety net.
+
+    This catches farewell phrases even when exact keyword matching fails
+    due to Unicode normalization differences between STT output and patterns.
+    """
+    normalized = unicodedata.normalize("NFC", text.lower().strip())
+    ascii_text = _strip_diacritics(normalized)
+    farewell_substrings = [
+        "tam biet", "goodbye", "bye", "ket thuc",
+        "ngat may", "dung cuoc goi", "end call", "hang up",
+        "hen gap lai",
+    ]
+    return any(sub in ascii_text for sub in farewell_substrings)
 
 
 _MAX_SESSIONS = int(os.environ.get("TOD_MAX_SESSIONS", "1000"))
@@ -221,11 +258,15 @@ class TODPipelineUseCase:
             not state.missing_required() and not state.confirmed and not state.executed
         )
         keyword_intent = _detect_keyword_intent(
-            user_text, awaiting_confirmation=awaiting_confirm,
+            user_text,
+            awaiting_confirmation=awaiting_confirm,
+            has_booking=bool(state.filled_slots()),
         )
 
         # 1. NLU: understand user intent and extract slots
         nlu_result = await self._nlu.understand(user_text)
+        # Ensure raw text is always available for downstream DST keyword fill
+        nlu_result.raw_text = user_text
 
         # Apply keyword override when detected
         if keyword_intent:
@@ -260,9 +301,17 @@ class TODPipelineUseCase:
                 # New cities → start a fresh booking
                 log.info("tod_new_booking_after_execute", session_id=session_id)
                 state.reset_for_new_booking()
-            elif keyword_intent in ("greet", "farewell"):
-                # Greeting/farewell after execute → don't reset, let policy handle
+            elif keyword_intent == "farewell":
+                # Farewell after execute → end the call
+                log.info("tod_farewell_after_execute", session_id=session_id)
+            elif keyword_intent == "greet":
+                # Greeting after execute → don't reset, let policy handle
                 pass
+            elif _is_farewell_text(user_text):
+                # Safety net: detect farewell from raw text even when keyword
+                # detection misses due to Unicode normalization differences
+                keyword_intent = "farewell"
+                log.info("tod_farewell_text_fallback_after_execute", session_id=session_id)
             else:
                 # Supplementary info (dates, airline, class) → update current booking
                 # and re-confirm with the updated details
@@ -270,7 +319,30 @@ class TODPipelineUseCase:
                 state.executed = False
                 state.confirmed = False
 
-        # 2b. DST: update belief state
+        # 2b. Farewell shortcut: if farewell detected (keyword or fallback),
+        #     skip DST/policy and go straight to farewell response.
+        if keyword_intent == "farewell":
+            state.turn_count += 1
+            self._states[session_id] = state
+            decision = PolicyDecision(action=PolicyAction.FAREWELL)
+            response_text = self._nlg.generate(decision, state)
+            log.info("tod_farewell_shortcut", action=decision.action.value)
+            state_dict = state.to_dict()
+            state_dict["slots"] = state.filled_slots()
+            return {
+                "response_text": response_text,
+                "nlu": {
+                    "intent": nlu_result.intent,
+                    "confidence": nlu_result.intent_confidence,
+                    "slots": {s.name: s.value for s in nlu_result.slots},
+                },
+                "state": state_dict,
+                "action": decision.action.value,
+                "target_slot": decision.target_slot,
+                "should_end_call": True,
+            }
+
+        # 2c. DST: update belief state
         state = self._dst.update(state, nlu_result)
         self._states[session_id] = state
         log.debug(
@@ -294,11 +366,18 @@ class TODPipelineUseCase:
             decision = self._policy.decide(state)
             log.info("tod_confirmation_accepted", new_action=decision.action.value)
         elif state.intent == "deny" and decision.action == PolicyAction.CONFIRM:
-            # User denied — reset confirmed flag and slots, ask again
+            # User denied — reset confirmation, keep filled slots so user
+            # can correct specific details rather than starting from scratch.
             state.confirmed = False
-            state.slots = dict.fromkeys(state.slots)
-            decision = self._policy.decide(state)
-            log.info("tod_denial_reset", new_action=decision.action.value)
+            # If user provided new slot values in same turn, DST already updated them.
+            # Re-run policy — if all slots still filled, re-confirm with updated info.
+            # Only ask for clarification if no new slots were provided.
+            if nlu_result.slots:
+                decision = self._policy.decide(state)
+                log.info("tod_denial_with_correction", new_action=decision.action.value)
+            else:
+                decision = PolicyDecision(action=PolicyAction.CLARIFY)
+                log.info("tod_denial_correction", new_action=decision.action.value)
 
         # 5. NLG: generate response
         response_text = self._nlg.generate(decision, state)
@@ -310,6 +389,9 @@ class TODPipelineUseCase:
             log.info("tod_post_execute", session_id=session_id)
         log.debug("tod_nlg_generated", response_length=len(response_text))
 
+        state_dict = state.to_dict()
+        state_dict["slots"] = state.filled_slots()  # Only show filled, not all None slots
+
         return {
             "response_text": response_text,
             "nlu": {
@@ -317,7 +399,8 @@ class TODPipelineUseCase:
                 "confidence": nlu_result.intent_confidence,
                 "slots": {s.name: s.value for s in nlu_result.slots},
             },
-            "state": state.to_dict(),
+            "state": state_dict,
             "action": decision.action.value,
             "target_slot": decision.target_slot,
+            "should_end_call": decision.action == PolicyAction.FAREWELL,
         }

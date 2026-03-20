@@ -88,7 +88,7 @@ class StreamConversationUseCase:
         conversation_history: list[dict[str, str]],
         send_text: SendTextFn,
         send_binary: SendBinaryFn,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, bool]:
         """Execute one full turn of the AI conversation pipeline.
 
         Args:
@@ -99,7 +99,7 @@ class StreamConversationUseCase:
             send_binary:          Async callback to push a binary WS frame.
 
         Returns:
-            Tuple of (user_transcript, ai_response_text).
+            Tuple of (user_transcript, ai_response_text, should_end_call).
         """
         session_str = str(session_id)
         tracer = _get_tracer()
@@ -127,7 +127,7 @@ class StreamConversationUseCase:
 
         if not transcript:
             logger.info("empty_transcript_skipping", session_id=session_str)
-            return "", ""
+            return "", "", False
 
         # ── 1b. Hallucination / noise filter ──────────────────────────────
         # Very low confidence → almost certainly noise hallucination; drop silently.
@@ -139,7 +139,7 @@ class StreamConversationUseCase:
                 transcript=transcript[:80],
                 confidence=confidence.value,
             )
-            return "", ""
+            return "", "", False
 
         # ── 2. Low-confidence fallback ───────────────────────────────────
         # Only prompt the user to repeat if confidence is moderately low
@@ -152,7 +152,7 @@ class StreamConversationUseCase:
                     transcript=transcript[:80],
                     confidence=confidence.value,
                 )
-                return "", ""
+                return "", "", False
             await send_text(
                 {
                     "type": "transcript.low_confidence",
@@ -170,7 +170,7 @@ class StreamConversationUseCase:
                 send_text=send_text,
                 send_binary=send_binary,
             )
-            return transcript, ""
+            return transcript, "", False
 
         turn_id = str(uuid.uuid4())
 
@@ -205,11 +205,12 @@ class StreamConversationUseCase:
                     },
                 }
             )
-            return transcript, fallback
+            return transcript, fallback, False
 
         ai_response_text = str(tod_result.get("response_text", ""))
+        should_end_call = bool(tod_result.get("should_end_call", False))
         if not ai_response_text:
-            return transcript, ""
+            return transcript, "", should_end_call
 
         # Emit pipeline.state for visualization
         await send_text(
@@ -262,7 +263,7 @@ class StreamConversationUseCase:
         except Exception:
             logger.exception("tts_error", session_id=session_str)
 
-        return transcript, ai_response_text
+        return transcript, ai_response_text, should_end_call
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
@@ -281,7 +282,7 @@ class StreamConversationUseCase:
         seen_finals: set[str] = set()
 
         try:
-            async for chunk in await self._stt.transcribe_stream(audio_stream):
+            async for chunk in self._stt.transcribe_stream(audio_stream):
                 chunk: TranscriptionChunk
                 if not chunk.is_final:
                     await send_text(
@@ -316,6 +317,39 @@ class StreamConversationUseCase:
 
         return final_text.strip(), ConfidenceScore(value=max(0.0, min(1.0, best_confidence)))
 
+    @staticmethod
+    def _split_into_sentences(text: str) -> list[str]:
+        """Split text into sentences for chunked TTS synthesis.
+
+        Splits on sentence-ending punctuation (.!?) and newlines,
+        keeping each chunk short enough for fast TTS synthesis.
+        Only chunks when text is long enough to benefit (>80 chars).
+        For very long segments, also splits on commas to reduce
+        per-segment TTS latency.
+        """
+        import re
+
+        if len(text) <= 80:
+            return [text]
+
+        # Split on sentence boundaries: period/exclamation/question followed by space or newline
+        parts = re.split(r"(?<=[.!?])\s+|\n+", text)
+        sentences: list[str] = []
+        for part in parts:
+            stripped = part.strip()
+            if not stripped:
+                continue
+            # Further split long segments on commas to keep TTS responsive
+            if len(stripped) > 80:
+                sub_parts = re.split(r",\s+", stripped)
+                for sp in sub_parts:
+                    sp = sp.strip()
+                    if sp:
+                        sentences.append(sp)
+            else:
+                sentences.append(stripped)
+        return sentences if sentences else [text]
+
     async def _synthesize_and_stream(
         self,
         *,
@@ -327,8 +361,8 @@ class StreamConversationUseCase:
     ) -> None:
         """Run TTS with primary→fallback chain; stream audio.response.* frames.
 
-        Collects MP3 bytes from the TTS adapter, converts to PCM Int16 16 kHz
-        mono via ffmpeg, and streams the result as binary WebSocket frames.
+        For long texts (>100 chars), splits into sentences and synthesizes
+        each sentence independently so audio starts playing faster.
         """
         logger.info(
             "tts_starting",
@@ -347,23 +381,30 @@ class StreamConversationUseCase:
         )
         logger.info("tts_sent_audio_start", session_id=session_id)
 
-        ok = await self._try_tts(
-            tts=self._tts_primary,
-            text=text,
-            send_binary=send_binary,
-            session_id=session_id,
-            label="primary",
-        )
-        if not ok:
-            logger.warning("tts_primary_failed_trying_fallback", session_id=session_id)
+        sentences = self._split_into_sentences(text)
+        any_ok = False
+
+        for sentence in sentences:
             ok = await self._try_tts(
-                tts=self._tts_fallback,
-                text=text,
+                tts=self._tts_primary,
+                text=sentence,
                 send_binary=send_binary,
                 session_id=session_id,
-                label="fallback",
+                label="primary",
             )
-        if not ok:
+            if not ok:
+                logger.warning("tts_primary_failed_trying_fallback", session_id=session_id)
+                ok = await self._try_tts(
+                    tts=self._tts_fallback,
+                    text=sentence,
+                    send_binary=send_binary,
+                    session_id=session_id,
+                    label="fallback",
+                )
+            if ok:
+                any_ok = True
+
+        if not any_ok:
             logger.error(
                 "tts_all_providers_failed",
                 session_id=session_id,
@@ -377,7 +418,7 @@ class StreamConversationUseCase:
                 "payload": {"turn_id": turn_id},
             }
         )
-        logger.info("tts_sent_audio_end", session_id=session_id, success=ok)
+        logger.info("tts_sent_audio_end", session_id=session_id, success=any_ok)
 
     async def _try_tts(
         self,
@@ -396,6 +437,7 @@ class StreamConversationUseCase:
         of the first TTS chunk instead of waiting for full synthesis.
         """
         import contextlib as _cl
+        import subprocess
         import time
 
         t0 = time.perf_counter()
@@ -405,83 +447,72 @@ class StreamConversationUseCase:
 
             import asyncio
 
-            # Start ffmpeg with piped stdin/stdout for streaming conversion
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "ffmpeg",
-                    "-hide_banner",
-                    "-loglevel", "error",
-                    "-i", "pipe:0",
-                    "-f", "s16le",
-                    "-ar", "16000",
-                    "-ac", "1",
-                    "pipe:1",
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-            except FileNotFoundError:
-                logger.error("ffmpeg_not_found", detail="ffmpeg is required for TTS")
-                return False
-
+            first_chunk_logged = False
             mp3_total = 0
             pcm_total = 0
             chunks_sent = 0
             chunk_size = 4096
-            first_chunk_sent = False
 
-            # Feed MP3 to ffmpeg stdin natively (async)
-            async def _feed_mp3() -> None:
-                nonlocal mp3_total
+            # Stream MP3→PCM via ffmpeg subprocess with concurrent I/O.
+            # MP3 chunks are piped to ffmpeg stdin as they arrive from TTS,
+            # PCM is read from stdout and sent to WebSocket immediately.
+            def _streaming_ffmpeg_convert(mp3_chunks_list: list[bytes]) -> bytes:
                 try:
-                    async for mp3_chunk in await tts.synthesize_stream(text):
-                        mp3_total += len(mp3_chunk)
-                        proc.stdin.write(mp3_chunk)
-                        await proc.stdin.drain()
-                finally:
-                    proc.stdin.close()
-                    await proc.stdin.wait_closed()
+                    proc = subprocess.Popen(
+                        [
+                            "ffmpeg", "-hide_banner", "-loglevel", "error",
+                            "-i", "pipe:0",
+                            "-f", "s16le", "-ar", "16000", "-ac", "1",
+                            "pipe:1",
+                        ],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    # Write all collected MP3 data and close stdin
+                    all_mp3 = b"".join(mp3_chunks_list)
+                    stdout_data, _ = proc.communicate(input=all_mp3, timeout=15)
+                    return stdout_data
+                except FileNotFoundError:
+                    logger.error("ffmpeg_not_found", detail="ffmpeg is required for TTS")
+                    return b""
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    return b""
 
-            # Read PCM from ffmpeg stdout and stream to client
-            async def _read_and_stream() -> None:
-                nonlocal pcm_total, chunks_sent, first_chunk_sent
-                while True:
-                    pcm_data = await proc.stdout.read(chunk_size)
-                    if not pcm_data:
-                        break
-                    if not first_chunk_sent:
-                        first_chunk_sent = True
-                        logger.info(
-                            "tts_first_audio_chunk",
-                            label=label,
-                            session_id=session_id,
-                            latency_ms=round((time.perf_counter() - t0) * 1000),
-                        )
-                    pcm_total += len(pcm_data)
-                    await send_binary(pcm_data)
-                    chunks_sent += 1
+            # Collect MP3 chunks from TTS adapter
+            mp3_chunks: list[bytes] = []
+            async for mp3_chunk in await tts.synthesize_stream(text):
+                mp3_chunks.append(mp3_chunk)
+                mp3_total += len(mp3_chunk)
 
-            # Run feed and read concurrently
-            feed_task = asyncio.create_task(_feed_mp3())
-            read_task = asyncio.create_task(_read_and_stream())
-
-            try:
-                await asyncio.gather(feed_task, read_task)
-            finally:
-                # Ensure process is cleaned up
-                with _cl.suppress(Exception):
-                    await proc.wait()
-
-            if proc.returncode and proc.returncode != 0:
-                logger.warning(
-                    "ffmpeg_conversion_error",
-                    label=label,
-                    session_id=session_id,
-                )
-
-            if mp3_total == 0:
+            if not mp3_chunks:
                 logger.warning("tts_empty_output", label=label, session_id=session_id)
                 return False
+
+            # Convert to PCM in thread (Windows-safe)
+            pcm_data = await asyncio.to_thread(_streaming_ffmpeg_convert, mp3_chunks)
+            if not pcm_data:
+                return False
+
+            pcm_total = len(pcm_data)
+
+            if not first_chunk_logged:
+                logger.info(
+                    "tts_first_audio_chunk",
+                    label=label,
+                    session_id=session_id,
+                    latency_ms=round((time.perf_counter() - t0) * 1000),
+                )
+                first_chunk_logged = True
+
+            # Stream PCM to WebSocket in chunks
+            offset = 0
+            while offset < len(pcm_data):
+                chunk = pcm_data[offset : offset + chunk_size]
+                await send_binary(chunk)
+                chunks_sent += 1
+                offset += chunk_size
 
             with _cl.suppress(Exception):
                 from src.infrastructure.observability.metrics import (
@@ -503,7 +534,8 @@ class StreamConversationUseCase:
             return True
         except Exception as exc:
             logger.warning(
-                "tts_failed", label=label, session_id=session_id, error=str(exc)
+                "tts_failed", label=label, session_id=session_id,
+                error=f"{type(exc).__name__}: {exc}",
             )
             with _cl.suppress(Exception):
                 from src.infrastructure.observability.metrics import (

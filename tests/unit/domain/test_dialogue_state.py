@@ -52,11 +52,48 @@ class TestMissingRequired:
 
     def test_partially_filled(self, fresh_state: DialogueState) -> None:
         fresh_state.slots["fromloc.city_name"] = "Hà Nội"
-        assert fresh_state.missing_required() == ["toloc.city_name"]
+        assert fresh_state.missing_required() == [
+            "toloc.city_name", "depart_date", "depart_time.time",
+            "airline_name", "class_type", "round_trip",
+        ]
 
-    def test_all_filled(self, fresh_state: DialogueState) -> None:
+    def test_cities_and_date_still_needs_rest(self, fresh_state: DialogueState) -> None:
         fresh_state.slots["fromloc.city_name"] = "Hà Nội"
         fresh_state.slots["toloc.city_name"] = "Đà Nẵng"
+        fresh_state.slots["depart_date.day_name"] = "thứ sáu"
+        assert fresh_state.missing_required() == [
+            "depart_time.time", "airline_name", "class_type", "round_trip",
+        ]
+
+    def test_all_filled_one_way(self, fresh_state: DialogueState) -> None:
+        fresh_state.slots["fromloc.city_name"] = "Hà Nội"
+        fresh_state.slots["toloc.city_name"] = "Đà Nẵng"
+        fresh_state.slots["depart_date.day_name"] = "thứ sáu"
+        fresh_state.slots["depart_time.time"] = "10 giờ sáng"
+        fresh_state.slots["airline_name"] = "Vietnam Airlines"
+        fresh_state.slots["class_type"] = "phổ thông"
+        fresh_state.slots["round_trip"] = "một chiều"
+        assert fresh_state.missing_required() == []
+
+    def test_round_trip_requires_return_date(self, fresh_state: DialogueState) -> None:
+        fresh_state.slots["fromloc.city_name"] = "Hà Nội"
+        fresh_state.slots["toloc.city_name"] = "Đà Nẵng"
+        fresh_state.slots["depart_date.day_name"] = "thứ sáu"
+        fresh_state.slots["depart_time.time"] = "10 giờ sáng"
+        fresh_state.slots["airline_name"] = "Vietnam Airlines"
+        fresh_state.slots["class_type"] = "phổ thông"
+        fresh_state.slots["round_trip"] = "khứ hồi"
+        assert fresh_state.missing_required() == ["return_date"]
+
+    def test_round_trip_all_filled(self, fresh_state: DialogueState) -> None:
+        fresh_state.slots["fromloc.city_name"] = "Hà Nội"
+        fresh_state.slots["toloc.city_name"] = "Đà Nẵng"
+        fresh_state.slots["depart_date.day_name"] = "thứ sáu"
+        fresh_state.slots["depart_time.time"] = "10 giờ sáng"
+        fresh_state.slots["airline_name"] = "Vietnam Airlines"
+        fresh_state.slots["class_type"] = "phổ thông"
+        fresh_state.slots["round_trip"] = "khứ hồi"
+        fresh_state.slots["return_date.day_name"] = "chủ nhật"
         assert fresh_state.missing_required() == []
 
 

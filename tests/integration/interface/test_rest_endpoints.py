@@ -184,22 +184,30 @@ class TestDialogueEndpoint:
         ) as client:
             sid = f"flow-{uuid.uuid4().hex[:8]}"
 
-            # Turn 1: destination only -> should request origin
+            # Turn 1: destination only -> should request more slots
             r = await client.post(
                 "/api/v1/dialogue/turn",
                 json={"session_id": sid, "text": "Tôi muốn đi Đà Nẵng"},
             )
             assert r.json()["action"] == "request_slot"
 
-            # Turn 2: provide origin -> should confirm
+            # Turn 2: provide origin -> still needs more slots
             r = await client.post(
                 "/api/v1/dialogue/turn",
                 json={"session_id": sid, "text": "từ Hà Nội"},
             )
-            action2 = r.json()["action"]
-            assert action2 in ("confirm", "execute")
+            assert r.json()["action"] == "request_slot"
 
-            # Turn 3: confirm -> should execute
+            # Fill remaining slots directly via TOD state so we can test confirm/execute
+            tod = test_app.state.tod_pipeline
+            state = tod.get_or_create_state(sid)
+            state.slots["depart_date.day_name"] = "thứ sáu"
+            state.slots["depart_time.time"] = "10 giờ sáng"
+            state.slots["airline_name"] = "Vietnam Airlines"
+            state.slots["class_type"] = "phổ thông"
+            state.slots["round_trip"] = "một chiều"
+
+            # Turn 3: affirm with all slots filled -> confirm then execute
             r = await client.post(
                 "/api/v1/dialogue/turn",
                 json={"session_id": sid, "text": "đúng rồi"},

@@ -215,12 +215,15 @@ class HandleCallUseCase:
         session_id: str,
         send_text: SendTextFn,
         send_binary: SendBinaryFn,
-    ) -> None:
+    ) -> bool:
         """Signal end-of-audio and run the STT→TOD→TTS pipeline.
 
         Signals the audio queue with the sentinel value, then runs
         :meth:`StreamConversationUseCase.run` with the accumulated audio
         and conversation history from Redis.
+
+        Returns:
+            True if the call should be ended (farewell detected).
         """
         queue = self._audio_queues.get(session_id)
         if queue is None:
@@ -244,8 +247,9 @@ class HandleCallUseCase:
         except ImportError:
             otel_token = None
 
+        should_end_call = False
         try:
-            user_transcript, ai_text = await self._stream.run(
+            user_transcript, ai_text, should_end_call = await self._stream.run(
                 session_id=uuid.UUID(session_id),
                 audio_stream=audio_gen,
                 conversation_history=conversation_history,
@@ -309,6 +313,8 @@ class HandleCallUseCase:
                     json.dumps({"role": "assistant", "content": ai_text}),
                 )
 
+        return should_end_call
+
     # ------------------------------------------------------------------ #
     # Session teardown                                                     #
     # ------------------------------------------------------------------ #
@@ -356,6 +362,26 @@ class HandleCallUseCase:
                 from src.infrastructure.observability.metrics import ws_disconnections_total
                 ws_disconnections_total.labels(reason="clean").inc()
 
+            # Snapshot TOD pipeline state before clearing (for post-call dashboard)
+            booking_snapshot: dict[str, object] | None = None
+            if self._tod_pipeline is not None:
+                try:
+                    tod_state = self._tod_pipeline.get_or_create_state(session_id)
+                    filled = tod_state.filled_slots()
+                    booking_snapshot = {
+                        "status": "completed" if tod_state.executed else (
+                            "confirmed" if tod_state.confirmed else "in_progress"
+                        ),
+                        "turnCount": tod_state.turn_count,
+                        "lastIntent": tod_state.intent,
+                        "filledSlots": filled,
+                        "missingSlots": tod_state.missing_required(),
+                        "slotsFilled": len(filled),
+                        "slotsTotal": len(tod_state.slots),
+                    }
+                except Exception:
+                    logger.warning("tod_state_snapshot_failed", session_id=session_id)
+
             # Persist all buffered messages and transition state in one session
             async with self._session_lock:
                 pending = self._pending_messages.pop(session_id, [])
@@ -370,6 +396,18 @@ class HandleCallUseCase:
                             await repo.bulk_append_messages(pending)
                         except Exception:
                             logger.exception("message_persist_error", session_id=session_id)
+                    # Persist booking snapshot as session metadata
+                    if booking_snapshot:
+                        try:
+                            await repo.update_metadata(
+                                uuid.UUID(session_id),
+                                {"booking": booking_snapshot},
+                            )
+                        except Exception:
+                            logger.exception(
+                                "booking_metadata_persist_error",
+                                session_id=session_id,
+                            )
                     try:
                         await repo.update_state(uuid.UUID(session_id), state)
                     except SessionNotFoundError:

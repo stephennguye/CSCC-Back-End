@@ -323,11 +323,16 @@ async def ws_call_handler(
                 # VAD detected end-of-speech — trigger the STT→TOD→TTS pipeline
                 logger.info("audio_end_vad", session_id=session_id)
                 await _send_session_state(websocket, session_id, "ai_thinking", "listening")
-                await handle_call.handle_audio_end(
+                should_end = await handle_call.handle_audio_end(
                     session_id,
                     send_text=lambda d: _send_adapted(websocket, d),
                     send_binary=lambda b: _send_binary(websocket, b),
                 )
+                if should_end:
+                    # Farewell detected — auto-end the call after TTS finishes
+                    logger.info("farewell_auto_end", session_id=session_id)
+                    await _teardown(websocket, session_id, handle_call, graceful=True)
+                    break
                 await _send_session_state(websocket, session_id, "listening", "ai_speaking")
                 continue
 
@@ -397,11 +402,15 @@ async def _dispatch_text_frame(
         await _send_session_state(websocket, session_id, "ai_thinking", "listening")
         # Wrap send_text with the adapter so all BE-internal frames are
         # translated to the FE-expected flat format before being sent over the wire.
-        await handle_call.handle_audio_end(
+        should_end = await handle_call.handle_audio_end(
             session_id,
             send_text=lambda d: _send_adapted(websocket, d),
             send_binary=lambda b: _send_binary(websocket, b),
         )
+        if should_end:
+            logger.info("farewell_auto_end", session_id=session_id)
+            await _teardown(websocket, session_id, handle_call, graceful=True)
+            return
         await _send_session_state(websocket, session_id, "listening", "ai_speaking")
 
     elif frame_type == "session.resume":

@@ -21,11 +21,14 @@ class RulePolicyAdapter:
 
     def decide(self, state: DialogueState) -> PolicyDecision:
         """Determine next action based on current dialogue state."""
-        # Greeting intent — always respond regardless of state
+        # Greeting intent — only when no booking in progress
         if state.intent == "greet":
-            return PolicyDecision(action=PolicyAction.GREET)
+            if not state.filled_slots():
+                return PolicyDecision(action=PolicyAction.GREET)
+            # Mid-booking greet: continue with slot collection/confirm
+            # Fall through to booking flow below
 
-        # Farewell intent — always respond regardless of state
+        # Farewell intent — always respond
         if state.intent == "farewell":
             return PolicyDecision(action=PolicyAction.FAREWELL)
 

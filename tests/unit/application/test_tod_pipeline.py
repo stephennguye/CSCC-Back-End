@@ -68,10 +68,9 @@ class TestProcessTurn:
         r1 = await pipeline.process_turn("s1", "Tôi muốn đi Đà Nẵng")
         assert r1["action"] == "request_slot"
 
-        # Turn 2: provide origin → both required slots filled
+        # Turn 2: provide origin → still needs more slots
         r2 = await pipeline.process_turn("s1", "từ Hà Nội")
-        # After filling both slots, could be confirm or execute depending on state
-        assert r2["action"] in ("confirm", "execute")
+        assert r2["action"] == "request_slot"
 
     async def test_state_persists_across_turns(self, pipeline: TODPipelineUseCase) -> None:
         await pipeline.process_turn("s1", "đi Đà Nẵng")
@@ -104,8 +103,15 @@ class TestProcessTurn:
         assert s2.intent == "greet"
 
     async def test_confirmation_flow(self, pipeline: TODPipelineUseCase) -> None:
-        # Fill required slots
-        await pipeline.process_turn("s1", "bay từ Hà Nội đến Đà Nẵng")
+        # Fill all required slots via state manipulation (one-way)
+        state = pipeline.get_or_create_state("s1")
+        state.slots["fromloc.city_name"] = "Hà Nội"
+        state.slots["toloc.city_name"] = "Đà Nẵng"
+        state.slots["depart_date.day_name"] = "thứ sáu"
+        state.slots["depart_time.time"] = "10 giờ sáng"
+        state.slots["airline_name"] = "Vietnam Airlines"
+        state.slots["class_type"] = "phổ thông"
+        state.slots["round_trip"] = "một chiều"
+        # All slots filled → should confirm, then affirm to execute
         r = await pipeline.process_turn("s1", "đúng rồi")
-        # After affirm, should execute
         assert r["action"] == "execute"
