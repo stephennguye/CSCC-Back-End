@@ -210,6 +210,18 @@ class RedisClient:
         results = await pipe.execute()
         return int(results[0])
 
+    async def increment_rate_limit_with_ttl(self, ip: str, endpoint: str) -> tuple[int, int]:
+        """Increment counter and return ``(count, ttl)`` in a single pipeline call."""
+        key = _rate_limit_key(ip, endpoint)
+        pipe = self._r.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, RATE_LIMIT_WINDOW_SECONDS, nx=True)
+        pipe.ttl(key)
+        results = await pipe.execute()
+        count = int(results[0])
+        ttl = max(int(results[2]), 0)
+        return count, ttl
+
     async def get_rate_limit_count(self, ip: str, endpoint: str) -> int:
         """Return the current request count for *ip* + *endpoint*."""
         value = await self._r.get(_rate_limit_key(ip, endpoint))

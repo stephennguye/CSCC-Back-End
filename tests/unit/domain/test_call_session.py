@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -86,8 +86,8 @@ class TestCallSessionInvariants:
             CallSession(
                 id=uuid.uuid4(),
                 state=SessionState.active,
-                created_at=datetime.utcnow(),
-                ended_at=datetime.utcnow(),
+                created_at=datetime.now(UTC),
+                ended_at=datetime.now(UTC),
             )
 
     def test_ended_without_ended_at_raises(self) -> None:
@@ -95,7 +95,7 @@ class TestCallSessionInvariants:
             CallSession(
                 id=uuid.uuid4(),
                 state=SessionState.ended,
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(UTC),
                 ended_at=None,
             )
 
@@ -104,6 +104,6 @@ class TestCallSessionInvariants:
             CallSession(
                 id=uuid.uuid4(),
                 state=SessionState.error,
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(UTC),
                 ended_at=None,
             )

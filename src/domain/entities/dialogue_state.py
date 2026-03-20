@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -79,7 +78,7 @@ class DialogueState:
     intent: str | None = None
     intent_confidence: float = 0.0
     slots: dict[str, str | None] = field(
-        default_factory=lambda: {slot: None for slot in BOOKING_SLOTS}
+        default_factory=lambda: dict.fromkeys(BOOKING_SLOTS)
     )
     confirmed: bool = False
     executed: bool = False
@@ -124,6 +123,6 @@ class DialogueState:
         """Reset state for a new booking while keeping session context."""
         self.intent = None
         self.intent_confidence = 0.0
-        self.slots = {slot: None for slot in BOOKING_SLOTS}
+        self.slots = dict.fromkeys(BOOKING_SLOTS)
         self.confirmed = False
         self.executed = False

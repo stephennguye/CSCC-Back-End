@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -52,7 +52,7 @@ class Claim:
         return cls(
             id=claim_id or uuid.uuid4(),
             session_id=session_id,
-            extracted_at=extracted_at or datetime.utcnow(),
+            extracted_at=extracted_at or datetime.now(UTC),
             schema_version=schema_version,
             student_name=student_name,
             issue_category=issue_category,

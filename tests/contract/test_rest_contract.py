@@ -114,7 +114,7 @@ class TestHealthResponseContract:
                 "redis": ServiceStatus(status="healthy", latency_ms=2),
                 "openai": ServiceStatus(status="healthy", latency_ms=100),
                 "huggingface": ServiceStatus(status="healthy", latency_ms=80),
-                "faster_whisper": ServiceStatus(status="healthy", latency_ms=10),
+                "google_cloud_stt": ServiceStatus(status="healthy", latency_ms=10),
                 "tts": ServiceStatus(status="healthy", latency_ms=15),
             },
         )

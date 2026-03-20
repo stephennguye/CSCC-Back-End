@@ -97,7 +97,7 @@ ws_bargein_total: Counter = _make_counter(  # type: ignore[type-arg]
 stt_processing_duration_seconds: Histogram = _make_histogram(  # type: ignore[type-arg]
     "cscc_stt_processing_duration_seconds",
     "Time in seconds to transcribe one audio segment.",
-    labels=["provider"],  # "faster_whisper"
+    labels=["provider"],  # "google_cloud_stt"
     buckets=(0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, float("inf")),
 )
 

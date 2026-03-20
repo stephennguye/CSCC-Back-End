@@ -24,7 +24,7 @@ import uuid
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from src.interface.dtos.rest_responses import ClaimData, ClaimsResponse
 
@@ -37,7 +37,6 @@ router = APIRouter(tags=["conversations"])
 # ── Dependency injection ────────────────────────────────────────────────────
 
 from src.interface.dependencies import get_session_factory
-
 
 # ── Endpoint ────────────────────────────────────────────────────────────────
 

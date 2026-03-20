@@ -41,6 +41,10 @@ _LIMIT_CONVERSATIONS: int = int(os.environ.get("RATE_LIMIT_CONVERSATIONS", "60")
 _LIMIT_DIALOGUE: int = int(os.environ.get("RATE_LIMIT_DIALOGUE", "30"))
 
 # Endpoints exempt from rate limiting
+_TRUSTED_PROXIES: set[str] = set(
+    os.environ.get("TRUSTED_PROXY_IPS", "127.0.0.1,::1").split(",")
+)
+
 _EXEMPT_PATHS: frozenset[str] = frozenset({
     "/api/v1/health",
     "/health",
@@ -72,14 +76,13 @@ def _get_limit_for_path(path: str) -> tuple[int, str] | None:
 
 
 def _client_ip(request: Request) -> str:
-    """Extract the real client IP, honouring X-Forwarded-For when present."""
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    if forwarded_for:
-        # Take the leftmost (original client) address
-        return forwarded_for.split(",")[0].strip()
-    if request.client:
-        return request.client.host
-    return "unknown"
+    """Extract the real client IP, trusting X-Forwarded-For only from known proxies."""
+    client_ip = request.client.host if request.client else "unknown"
+    if client_ip in _TRUSTED_PROXIES:
+        forwarded = request.headers.get("x-forwarded-for") or request.headers.get("X-Forwarded-For") or ""
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return client_ip
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -119,8 +122,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         try:
-            count: int = await redis.increment_rate_limit(ip, group)
-            ttl: int = await redis.get_rate_limit_ttl(ip, group)
+            count, ttl = await redis.increment_rate_limit_with_ttl(ip, group)
         except Exception:
             # Redis error — degrade gracefully.
             logger.warning("rate_limit_redis_error", path=path, ip=ip)

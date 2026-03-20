@@ -10,7 +10,6 @@ import re
 
 from src.domain.entities.dialogue_state import NLUResult, SlotValue
 
-
 # Vietnamese city name mapping
 CITY_PATTERNS: dict[str, str] = {
     r"hà\s*nội|ha\s*noi|hn": "Hà Nội",

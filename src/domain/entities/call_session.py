@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from src.domain.value_objects.session_state import SessionState
@@ -33,7 +33,7 @@ class CallSession:
         return cls(
             id=session_id or uuid.uuid4(),
             state=SessionState.active,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(UTC),
             ended_at=None,
             metadata=metadata,
         )
@@ -46,13 +46,13 @@ class CallSession:
         """Transition the session to *ended* state."""
         self._validate_active("end")
         self.state = SessionState.ended
-        self.ended_at = ended_at or datetime.utcnow()
+        self.ended_at = ended_at or datetime.now(UTC)
 
     def mark_error(self, ended_at: datetime | None = None) -> None:
         """Transition the session to *error* state."""
         self._validate_active("mark_error")
         self.state = SessionState.error
-        self.ended_at = ended_at or datetime.utcnow()
+        self.ended_at = ended_at or datetime.now(UTC)
 
     # ------------------------------------------------------------------ #
     # Invariants                                                           #

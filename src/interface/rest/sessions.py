@@ -103,7 +103,6 @@ def _ws_url(request: Request, session_id: str) -> str:
 
 from src.interface.dependencies import get_handle_call, get_session_factory
 
-
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
 

@@ -7,7 +7,7 @@ using SQLAlchemy async ORM.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
@@ -118,7 +118,7 @@ class PostgresCallSessionRepository:
                 )
             row.state = str(new_state)
             if new_state in (SessionState.ended, SessionState.error):
-                row.ended_at = row.ended_at or datetime.utcnow()
+                row.ended_at = row.ended_at or datetime.now(UTC)
             await self._session.flush()
             return _model_to_session(row)
         except SessionNotFoundError:
@@ -171,6 +171,56 @@ class PostgresCallSessionRepository:
             )
         except Exception as exc:
             raise PersistenceError(f"Failed to append Message: {exc}") from exc
+
+    async def bulk_append_messages(self, messages: list[Message]) -> list[Message]:
+        """Insert multiple *Message* records with pre-computed sequence numbers.
+
+        Gets the current max sequence_number once, then inserts all messages
+        in a single flush — far more efficient than per-message SELECT MAX + INSERT.
+        """
+        if not messages:
+            return []
+        try:
+            session_id = messages[0].session_id
+            result = await self._session.execute(
+                select(func.coalesce(func.max(MessageModel.sequence_number), 0)).where(
+                    MessageModel.session_id == session_id
+                )
+            )
+            max_seq: int = result.scalar_one()  # type: ignore[assignment]
+
+            persisted: list[Message] = []
+            for i, message in enumerate(messages, start=1):
+                next_seq = max_seq + i
+                row = MessageModel(
+                    id=message.id,
+                    session_id=message.session_id,
+                    role=str(message.role),
+                    content=message.content,
+                    confidence_score=(
+                        message.confidence_score.value
+                        if message.confidence_score is not None
+                        else None
+                    ),
+                    timestamp=message.timestamp,
+                    sequence_number=next_seq,
+                )
+                self._session.add(row)
+                persisted.append(
+                    Message(
+                        id=message.id,
+                        session_id=message.session_id,
+                        role=message.role,
+                        content=message.content,
+                        timestamp=message.timestamp,
+                        sequence_number=next_seq,
+                        confidence_score=message.confidence_score,
+                    )
+                )
+            await self._session.flush()
+            return persisted
+        except Exception as exc:
+            raise PersistenceError(f"Failed to bulk append Messages: {exc}") from exc
 
     async def list_messages_by_session(
         self,

@@ -57,21 +57,38 @@ class TestGetLimitForPath:
 
 
 class TestClientIP:
-    def test_x_forwarded_for_single(self) -> None:
+    def test_x_forwarded_for_from_trusted_proxy(self) -> None:
+
+        class FakeClient:
+            host = "127.0.0.1"
 
         class FakeRequest:
             headers = {"X-Forwarded-For": "1.2.3.4"}
-            client = None
+            client = FakeClient()
 
         assert _client_ip(FakeRequest()) == "1.2.3.4"
 
-    def test_x_forwarded_for_multiple(self) -> None:
+    def test_x_forwarded_for_multiple_from_trusted_proxy(self) -> None:
+
+        class FakeClient:
+            host = "127.0.0.1"
 
         class FakeRequest:
             headers = {"X-Forwarded-For": "1.2.3.4, 5.6.7.8"}
-            client = None
+            client = FakeClient()
 
         assert _client_ip(FakeRequest()) == "1.2.3.4"
+
+    def test_x_forwarded_for_ignored_from_untrusted_client(self) -> None:
+
+        class FakeClient:
+            host = "10.0.0.99"
+
+        class FakeRequest:
+            headers = {"X-Forwarded-For": "spoofed.ip"}
+            client = FakeClient()
+
+        assert _client_ip(FakeRequest()) == "10.0.0.99"
 
     def test_direct_client(self) -> None:
 

@@ -12,6 +12,7 @@ Responsibilities
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import os
 import uuid
@@ -258,31 +259,33 @@ async def _startup(app: FastAPI) -> None:
     from src.infrastructure.nlg.template_nlg_adapter import TemplateNLGAdapter
     from src.infrastructure.nlu.jointbert_nlu_adapter import JointBERTNLUAdapter
     from src.infrastructure.policy.rule_policy_adapter import RulePolicyAdapter
-    from src.infrastructure.stt.faster_whisper_adapter import FasterWhisperAdapter
+    from src.infrastructure.stt.google_cloud_stt_adapter import GoogleCloudSTTAdapter
     from src.infrastructure.tts.edge_tts_adapter import EdgeTTSAdapter
     from src.infrastructure.tts.gtts_adapter import GTTSAdapter
+
+    # ── JWT secret validation ────────────────────────────────────────────
+    jwt_secret = os.environ.get("JWT_SECRET", "")
+    if not jwt_secret or jwt_secret == "changeme-use-a-real-secret-in-production":  # noqa: S105
+        _log.warning("jwt_secret_weak_or_missing", hint="Set JWT_SECRET to a secure random value")
 
     # ── Infrastructure singletons ──────────────────────────────────────────
     redis = RedisClient()
     await redis.connect()
     app.state.redis = redis
 
-    stt = FasterWhisperAdapter()
+    stt = GoogleCloudSTTAdapter()
+    app.state.stt = stt
     tts_primary = EdgeTTSAdapter()
     tts_fallback = GTTSAdapter()
 
-    # Pre-load the STT model at startup so the first call isn't delayed
-    # by a ~50s model download.
-    try:
-        from src.infrastructure.stt.faster_whisper_adapter import _get_model
-        _log.info("preloading_stt_model")
-        await _get_model()
-        _log.info("stt_model_preloaded")
-    except Exception as exc:
-        _log.warning("stt_model_preload_failed", error=str(exc))
-
     # ── TOD pipeline infrastructure ──────────────────────────────────────
     nlu_adapter = JointBERTNLUAdapter()
+    try:
+        _log.info("preloading_nlu_model")
+        await asyncio.get_running_loop().run_in_executor(None, nlu_adapter._load_model)
+        _log.info("nlu_model_preloaded")
+    except Exception as exc:
+        _log.warning("nlu_model_preload_failed", error=str(exc))
     dst_adapter = HybridDSTAdapter()
     policy_adapter = RulePolicyAdapter()
     nlg_adapter = TemplateNLGAdapter()
@@ -322,6 +325,11 @@ async def _shutdown(app: FastAPI) -> None:
     redis: RedisClient | None = getattr(app.state, "redis", None)
     if redis is not None:
         await redis.close()
+
+    stt = getattr(app.state, "stt", None)
+    if stt is not None and hasattr(stt, "close"):
+        await stt.close()
+
     _log.info("infrastructure_shutdown_complete")
 
 

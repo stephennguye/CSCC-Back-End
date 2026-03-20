@@ -16,11 +16,10 @@ from __future__ import annotations
 import contextlib
 import json
 import uuid
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
 from pydantic import ValidationError
 
 from src.domain.errors import PayloadValidationError
@@ -37,7 +36,6 @@ router = APIRouter()
 # ── Dependency injection via app.state ───────────────────────────────────────
 
 from src.interface.dependencies import get_handle_call_ws as get_handle_call
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -199,7 +197,7 @@ async def _send_error(
     code: str,
     message: str,
     *,
-    recoverable: bool = False,  # noqa: ARG001
+    recoverable: bool = False,
 ) -> None:
     # FE expects flat { type, code, message } — no payload wrapper, no session_id
     await _send_text(
@@ -269,16 +267,10 @@ async def ws_call_handler(
     # ── Verify session exists in the call handler state ───────────────────
     # (The session was already created via POST /sessions; if it's not in
     #  the use case's queue map it means this is a fresh WS connect)
-    # Ensure queue exists by reaching into handle_call state map
-    if session_id not in handle_call._audio_queues:
-        import asyncio
-
-        handle_call._audio_queues[session_id] = asyncio.Queue()
-        handle_call._pending_messages[session_id] = []
+    handle_call.ensure_session_ready(session_id)
 
     # Clear stale dialogue state on reconnect so intent/slots don't carry over
-    if handle_call._tod_pipeline is not None:
-        handle_call._tod_pipeline.clear_state(session_id)
+    handle_call.clear_pipeline_state(session_id)
 
     # ── Accept the WebSocket connection ────────────────────────────────────
     await websocket.accept()
@@ -287,7 +279,7 @@ async def ws_call_handler(
 
     # Mark presence (graceful on Redis failure)
     with contextlib.suppress(Exception):
-        await handle_call._redis.mark_present(session_id)
+        await handle_call.mark_present(session_id)
 
     # Notify client that we're listening
     await _send_session_state(websocket, session_id, "listening")
@@ -342,7 +334,7 @@ async def ws_call_handler(
             if fe_type == "barge_in":
                 # FE detected voice activity during AI speech — publish Redis cancel signal
                 logger.debug("barge_in_frame_received", session_id=session_id)
-                await handle_call._redis.publish_barge_in(session_id)
+                await handle_call.publish_barge_in(session_id)
                 await _send_text(websocket, {"type": "barge_in_ack"})
                 continue
 

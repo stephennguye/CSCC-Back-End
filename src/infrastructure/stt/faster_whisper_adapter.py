@@ -247,9 +247,7 @@ class FasterWhisperAdapter:
             # For moderately high (>0.7), only penalize longer audio (>2s)
             # since short real utterances like "vâng" can have elevated no_speech_prob.
             if hasattr(segment, "no_speech_prob"):
-                if segment.no_speech_prob > 0.9:
-                    raw_confidence = min(raw_confidence, 0.1)
-                elif segment.no_speech_prob > 0.7 and duration_sec > 2.0:
+                if segment.no_speech_prob > 0.9 or (segment.no_speech_prob > 0.7 and duration_sec > 2.0):
                     raw_confidence = min(raw_confidence, 0.1)
 
             # Hallucination filter: reject known garbage patterns

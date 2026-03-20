@@ -87,13 +87,21 @@ async def _probe_huggingface() -> None:
         raise OSError(msg)
 
 
-async def _probe_faster_whisper() -> None:
-    """Check that faster-whisper is importable (local model, no network)."""
+async def _probe_google_cloud_stt() -> None:
+    """Check Google Cloud STT API key is configured and endpoint is reachable."""
+    api_key = os.environ.get("GOOGLE_CLOUD_API_KEY", "")
+    if not api_key:
+        msg = "GOOGLE_CLOUD_API_KEY not configured"
+        raise OSError(msg)
+    import httpx
 
-    def _check() -> None:
-        import faster_whisper  # noqa: F401
-
-    await asyncio.get_event_loop().run_in_executor(None, _check)
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.get(
+            "https://speech.googleapis.com/v1/operations",
+            params={"key": api_key},
+        )
+        if resp.status_code == 403:
+            raise OSError("GOOGLE_CLOUD_API_KEY is invalid or Speech-to-Text API not enabled")
 
 
 async def _probe_tts() -> None:
@@ -105,7 +113,7 @@ async def _probe_tts() -> None:
         except ImportError:
             import edge_tts  # type: ignore[import-untyped]  # noqa: F401
 
-    await asyncio.get_event_loop().run_in_executor(None, _check)
+    await asyncio.get_running_loop().run_in_executor(None, _check)
 
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -152,20 +160,20 @@ async def get_health(request: Request) -> JSONResponse:
         await asyncio.gather(
             pg_coro,
             redis_coro,
-            _probe(_probe_faster_whisper()),
+            _probe(_probe_google_cloud_stt()),
             _probe(_probe_tts()),
         )
     )
 
     pg_ok, pg_ms, pg_err = gathered[0]
     redis_ok, redis_ms, redis_err = gathered[1]
-    whisper_ok, whisper_ms, whisper_err = gathered[2]
+    stt_ok, stt_ms, stt_err = gathered[2]
     tts_ok, tts_ms, tts_err = gathered[3]
 
     # ── Determine overall status ──────────────────────────────────────────────
     # Critical: postgres, redis
     critical_down = (not pg_ok) or (not redis_ok)
-    any_down = not all([pg_ok, redis_ok, whisper_ok, tts_ok])
+    any_down = not all([pg_ok, redis_ok, stt_ok, tts_ok])
 
     if critical_down:
         http_status = 503
@@ -190,7 +198,7 @@ async def get_health(request: Request) -> JSONResponse:
         services={
             "postgres": _svc(pg_ok, pg_ms, pg_err),
             "redis": _svc(redis_ok, redis_ms, redis_err),
-            "faster_whisper": _svc(whisper_ok, whisper_ms, whisper_err),
+            "google_cloud_stt": _svc(stt_ok, stt_ms, stt_err),
             "tts": _svc(tts_ok, tts_ms, tts_err),
         },
     )
@@ -200,7 +208,7 @@ async def get_health(request: Request) -> JSONResponse:
         status=overall,
         postgres=pg_ok,
         redis=redis_ok,
-        faster_whisper=whisper_ok,
+        google_cloud_stt=stt_ok,
         tts=tts_ok,
     )
 

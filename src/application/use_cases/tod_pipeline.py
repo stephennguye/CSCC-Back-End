@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 
@@ -148,6 +149,9 @@ def _detect_keyword_intent(
     return None
 
 
+_MAX_SESSIONS = int(os.environ.get("TOD_MAX_SESSIONS", "1000"))
+
+
 class TODPipelineUseCase:
     """Orchestrates the NLU -> DST -> Policy -> NLG pipeline.
 
@@ -168,9 +172,16 @@ class TODPipelineUseCase:
         self._nlg = nlg
         self._states: dict[str, DialogueState] = {}
 
+    def _evict_if_needed(self) -> None:
+        """Evict the oldest session state if at capacity."""
+        if len(self._states) > _MAX_SESSIONS:
+            oldest_key = next(iter(self._states))
+            del self._states[oldest_key]
+
     def get_or_create_state(self, session_id: str) -> DialogueState:
         """Get existing dialogue state or create a new one."""
         if session_id not in self._states:
+            self._evict_if_needed()
             self._states[session_id] = DialogueState.create(session_id)
         return self._states[session_id]
 
@@ -285,7 +296,7 @@ class TODPipelineUseCase:
         elif state.intent == "deny" and decision.action == PolicyAction.CONFIRM:
             # User denied — reset confirmed flag and slots, ask again
             state.confirmed = False
-            state.slots = {k: None for k in state.slots}
+            state.slots = dict.fromkeys(state.slots)
             decision = self._policy.decide(state)
             log.info("tod_denial_reset", new_action=decision.action.value)
 

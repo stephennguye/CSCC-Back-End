@@ -23,6 +23,7 @@ import structlog
 
 from src.domain.errors import TranscriptionError
 from src.domain.value_objects.confidence_score import ConfidenceScore
+from src.infrastructure.observability.noop_tracer import _NoopTracer
 
 if TYPE_CHECKING:
     from src.application.ports.stt_port import STTPort, TranscriptionChunk
@@ -41,22 +42,6 @@ def _get_tracer():  # type: ignore[return]  # noqa: ANN202
         return trace.get_tracer("cscc.stream_conversation")
     except ImportError:
         return _NoopTracer()
-
-
-class _NoopSpan:
-    def set_attribute(self, _key: str, _value: object) -> None:
-        pass
-
-    def __enter__(self) -> _NoopSpan:
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        pass
-
-
-class _NoopTracer:
-    def start_as_current_span(self, _name: str, **_kw: object) -> _NoopSpan:
-        return _NoopSpan()
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -272,7 +257,7 @@ class StreamConversationUseCase:
                 ),
                 timeout=15.0,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("tts_timeout", session_id=session_str, text_length=len(ai_response_text))
         except Exception:
             logger.exception("tts_error", session_id=session_str)
@@ -411,7 +396,6 @@ class StreamConversationUseCase:
         of the first TTS chunk instead of waiting for full synthesis.
         """
         import contextlib as _cl
-        import subprocess
         import time
 
         t0 = time.perf_counter()
@@ -419,53 +403,50 @@ class StreamConversationUseCase:
         try:
             logger.info("tts_synthesizing", label=label, session_id=session_id)
 
+            import asyncio
+
             # Start ffmpeg with piped stdin/stdout for streaming conversion
             try:
-                proc = subprocess.Popen(
-                    [
-                        "ffmpeg",
-                        "-hide_banner",
-                        "-loglevel", "error",
-                        "-i", "pipe:0",
-                        "-f", "s16le",
-                        "-ar", "16000",
-                        "-ac", "1",
-                        "pipe:1",
-                    ],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel", "error",
+                    "-i", "pipe:0",
+                    "-f", "s16le",
+                    "-ar", "16000",
+                    "-ac", "1",
+                    "pipe:1",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
                 )
             except FileNotFoundError:
                 logger.error("ffmpeg_not_found", detail="ffmpeg is required for TTS")
                 return False
 
-            import asyncio
-
-            loop = asyncio.get_event_loop()
             mp3_total = 0
             pcm_total = 0
             chunks_sent = 0
             chunk_size = 4096
             first_chunk_sent = False
 
-            # Feed MP3 to ffmpeg stdin in a thread (blocking writes)
+            # Feed MP3 to ffmpeg stdin natively (async)
             async def _feed_mp3() -> None:
                 nonlocal mp3_total
                 try:
                     async for mp3_chunk in await tts.synthesize_stream(text):
                         mp3_total += len(mp3_chunk)
-                        await loop.run_in_executor(None, proc.stdin.write, mp3_chunk)
+                        proc.stdin.write(mp3_chunk)
+                        await proc.stdin.drain()
                 finally:
-                    await loop.run_in_executor(None, proc.stdin.close)
+                    proc.stdin.close()
+                    await proc.stdin.wait_closed()
 
             # Read PCM from ffmpeg stdout and stream to client
             async def _read_and_stream() -> None:
                 nonlocal pcm_total, chunks_sent, first_chunk_sent
                 while True:
-                    pcm_data = await loop.run_in_executor(
-                        None, proc.stdout.read, chunk_size
-                    )
+                    pcm_data = await proc.stdout.read(chunk_size)
                     if not pcm_data:
                         break
                     if not first_chunk_sent:
@@ -489,19 +470,13 @@ class StreamConversationUseCase:
             finally:
                 # Ensure process is cleaned up
                 with _cl.suppress(Exception):
-                    proc.stdout.close()
-                with _cl.suppress(Exception):
-                    proc.stderr.close()
-                with _cl.suppress(Exception):
-                    await loop.run_in_executor(None, proc.wait)
+                    await proc.wait()
 
             if proc.returncode and proc.returncode != 0:
-                stderr = proc.stderr.read() if proc.stderr else b""
                 logger.warning(
                     "ffmpeg_conversion_error",
                     label=label,
                     session_id=session_id,
-                    stderr=stderr.decode(errors="replace")[:200] if stderr else "",
                 )
 
             if mp3_total == 0:

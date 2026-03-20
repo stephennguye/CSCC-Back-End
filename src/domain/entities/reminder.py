@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 
 @dataclass
@@ -37,7 +37,7 @@ class Reminder:
             id=reminder_id or uuid.uuid4(),
             session_id=session_id,
             description=description,
-            created_at=created_at or datetime.utcnow(),
+            created_at=created_at or datetime.now(UTC),
             target_due_at=target_due_at,
         )
 

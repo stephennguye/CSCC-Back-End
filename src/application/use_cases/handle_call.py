@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import uuid
 from collections.abc import AsyncGenerator, Callable
 from typing import TYPE_CHECKING, Any
@@ -26,6 +27,7 @@ import structlog
 from src.domain.entities.call_session import CallSession
 from src.domain.errors import SessionNotFoundError
 from src.domain.value_objects.session_state import SessionState
+from src.infrastructure.observability.noop_tracer import _NoopTracer
 
 if TYPE_CHECKING:
     from src.application.use_cases.stream_conversation import (
@@ -50,22 +52,6 @@ def _get_tracer():  # type: ignore[return]  # noqa: ANN202
         return trace.get_tracer("cscc.handle_call")
     except ImportError:
         return _NoopTracer()
-
-
-class _NoopSpan:
-    def set_attribute(self, _key: str, _value: object) -> None:
-        pass
-
-    def __enter__(self) -> _NoopSpan:
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        pass
-
-
-class _NoopTracer:
-    def start_as_current_span(self, _name: str, **_kw: object) -> _NoopSpan:
-        return _NoopSpan()
 
 
 # ── Sentinel to signal end-of-audio-stream ────────────────────────────────────
@@ -104,6 +90,9 @@ class HandleCallUseCase:
 
         # Track whether AI is currently generating a response
         self._ai_responding: set[str] = set()
+
+        # Guards concurrent mutations of _audio_queues / _pending_messages / _ai_responding
+        self._session_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ #
     # Session lifecycle                                                    #
@@ -167,6 +156,33 @@ class HandleCallUseCase:
         return session
 
     # ------------------------------------------------------------------ #
+    # Public session-state helpers (used by call_controller)               #
+    # ------------------------------------------------------------------ #
+
+    def ensure_session_ready(self, session_id: str) -> None:
+        """Ensure per-session queues exist (idempotent)."""
+        self._audio_queues.setdefault(session_id, asyncio.Queue())
+        self._pending_messages.setdefault(session_id, [])
+
+    def reset_session(self, session_id: str) -> None:
+        """Reset per-session audio queue and pending messages."""
+        self._audio_queues[session_id] = asyncio.Queue()
+        self._pending_messages[session_id] = []
+
+    def clear_pipeline_state(self, session_id: str) -> None:
+        """Clear TOD pipeline dialogue state for *session_id*."""
+        if self._tod_pipeline is not None:
+            self._tod_pipeline.clear_state(session_id)
+
+    async def publish_barge_in(self, session_id: str) -> None:
+        """Publish a barge-in cancellation signal via Redis."""
+        await self._redis.publish_barge_in(session_id)
+
+    async def mark_present(self, session_id: str) -> None:
+        """Mark the session as present in Redis."""
+        await self._redis.mark_present(session_id)
+
+    # ------------------------------------------------------------------ #
     # Audio frame handling                                                 #
     # ------------------------------------------------------------------ #
 
@@ -219,7 +235,8 @@ class HandleCallUseCase:
         # Read conversation history from Redis buffer
         conversation_history = await self._build_conversation_history(session_id)
 
-        self._ai_responding.add(session_id)
+        async with self._session_lock:
+            self._ai_responding.add(session_id)
         try:
             from opentelemetry import baggage, context  # type: ignore[import-untyped]
             ctx = baggage.set_baggage("session_id", session_id)
@@ -236,36 +253,48 @@ class HandleCallUseCase:
                 send_binary=send_binary,
             )
         finally:
-            self._ai_responding.discard(session_id)
+            async with self._session_lock:
+                self._ai_responding.discard(session_id)
             if otel_token is not None:
                 with contextlib.suppress(Exception):
                     from opentelemetry import context as otel_ctx  # type: ignore[import-untyped]
                     otel_ctx.detach(otel_token)
 
         # Re-create a fresh queue for the next turn
-        self._audio_queues[session_id] = asyncio.Queue()
+        async with self._session_lock:
+            self._audio_queues[session_id] = asyncio.Queue()
 
         # Buffer messages for DB persistence at teardown (for post-call dashboard)
         from src.domain.entities.message import Message
         from src.domain.value_objects.speaker_role import SpeakerRole
 
-        pending = self._pending_messages.setdefault(session_id, [])
-        seq = len(pending) + 1
+        async with self._session_lock:
+            pending = self._pending_messages.setdefault(session_id, [])
+            seq = len(pending) + 1
 
-        import json
-
-        if user_transcript:
-            pending.append(
-                Message.create(
-                    session_id=uuid.UUID(session_id),
-                    role=SpeakerRole.user,
-                    content=user_transcript,
-                    sequence_number=seq,
+            if user_transcript:
+                pending.append(
+                    Message.create(
+                        session_id=uuid.UUID(session_id),
+                        role=SpeakerRole.user,
+                        content=user_transcript,
+                        sequence_number=seq,
+                    )
                 )
-            )
-            seq += 1
+                seq += 1
 
-            # Buffer user text for Redis conversation context
+            if ai_text:
+                pending.append(
+                    Message.create(
+                        session_id=uuid.UUID(session_id),
+                        role=SpeakerRole.ai,
+                        content=ai_text,
+                        sequence_number=seq,
+                    )
+                )
+
+        # Buffer user/AI text for Redis conversation context (outside lock)
+        if user_transcript:
             with contextlib.suppress(Exception):
                 await self._redis.push_to_buffer(
                     session_id,
@@ -273,15 +302,6 @@ class HandleCallUseCase:
                 )
 
         if ai_text:
-            pending.append(
-                Message.create(
-                    session_id=uuid.UUID(session_id),
-                    role=SpeakerRole.ai,
-                    content=ai_text,
-                    sequence_number=seq,
-                )
-            )
-
             # Buffer the AI response for context in the next turn
             with contextlib.suppress(Exception):
                 await self._redis.push_to_buffer(
@@ -319,10 +339,12 @@ class HandleCallUseCase:
             span.set_attribute("final_state", fin)
 
             # Cancel any in-progress AI response
-            if session_id in self._ai_responding:
+            async with self._session_lock:
+                was_responding = session_id in self._ai_responding
+                self._ai_responding.discard(session_id)
+            if was_responding:
                 with contextlib.suppress(Exception):
                     await self._redis.publish_barge_in(session_id)
-                self._ai_responding.discard(session_id)
 
             # Remove presence marker (graceful on Redis failure)
             with contextlib.suppress(Exception):
@@ -335,16 +357,17 @@ class HandleCallUseCase:
                 ws_disconnections_total.labels(reason="clean").inc()
 
             # Persist all buffered messages and transition state in one session
-            pending = self._pending_messages.pop(session_id, [])
+            async with self._session_lock:
+                pending = self._pending_messages.pop(session_id, [])
             try:
                 async with self._session_factory() as db_session:
                     from src.infrastructure.db.postgres.call_session_repo import (
                         PostgresCallSessionRepository,
                     )
                     repo = PostgresCallSessionRepository(db_session)
-                    for message in pending:
+                    if pending:
                         try:
-                            await repo.append_message(message)
+                            await repo.bulk_append_messages(pending)
                         except Exception:
                             logger.exception("message_persist_error", session_id=session_id)
                     try:
@@ -356,7 +379,8 @@ class HandleCallUseCase:
                 logger.exception("teardown_db_error", session_id=session_id)
 
             # Cleanup per-session state
-            self._audio_queues.pop(session_id, None)
+            async with self._session_lock:
+                self._audio_queues.pop(session_id, None)
 
             # Free TOD pipeline dialogue state for this session
             if self._tod_pipeline is not None:
@@ -372,8 +396,6 @@ class HandleCallUseCase:
         self, session_id: str
     ) -> list[dict[str, str]]:
         """Read the Redis short-term buffer and deserialise into message dicts."""
-        import json
-
         try:
             turns = await self._redis.get_buffer(session_id)
         except Exception:

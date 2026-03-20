@@ -14,10 +14,10 @@ from src.domain.entities.dialogue_state import (
 
 __all__ = [
     "BOOKING_SLOTS",
+    "REQUIRED_SLOTS",
     "DialogueState",
     "NLUResult",
     "PolicyAction",
     "PolicyDecision",
-    "REQUIRED_SLOTS",
     "SlotValue",
 ]
